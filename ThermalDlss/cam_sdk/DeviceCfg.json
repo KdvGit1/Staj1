@@ -1,0 +1,53 @@
+{
+	"Devices":	[{
+			"ID":	0,
+			"SerialNumber":	"DS-2TD2617-3/QA20251020AAWREA5755327",
+			"ChannelNumber":	2,
+			"StartChannel":	1,
+			"AlarmInNum":	2,
+			"AlarmOutNum":	2,
+			"IPChanNum":	0,
+			"MirrorChanNum":	0,
+			"StartMirrorChanNo":	0,
+			"LocalNodeName":	"192.168.1.128",
+			"DeviceType":	44,
+			"DiskNum":	1,
+			"LoginUserName":	"admin",
+			"LoginUserPwd":	"ersindemiray26",
+			"DeviceIP":	"192.168.1.128",
+			"DeviceMultiIP":	"239.0.0.1",
+			"DevicePort":	8000,
+			"DeviceName":	"",
+			"LoginMode":	0,
+			"Https":	0,
+			"Channels":	[{
+					"ChanID":	0,
+					"DeviceIndex":	0,
+					"ChanIndex":	0,
+					"ChanName":	"Camera1",
+					"Protocol":	0,
+					"PicResolution":	0,
+					"PicQuality":	0,
+					"Enable":	1,
+					"PreviewMode":	0,
+					"PreviewProtocolType":	0,
+					"VideoCodingType":	0,
+					"StreamType":	0,
+					"LinkMode":	0
+				}, {
+					"ChanID":	1,
+					"DeviceIndex":	0,
+					"ChanIndex":	1,
+					"ChanName":	"Camera2",
+					"Protocol":	0,
+					"PicResolution":	0,
+					"PicQuality":	0,
+					"Enable":	1,
+					"PreviewMode":	0,
+					"PreviewProtocolType":	0,
+					"VideoCodingType":	0,
+					"StreamType":	0,
+					"LinkMode":	0
+				}]
+		}]
+}

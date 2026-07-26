@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+.dvc/config.local
+
+# DVC local cache/runtime files (DVC metadata remains tracked)
+.dvc/cache/
+.dvc/tmp/
+.dvc-system/
+.dvc-global/
+.dvc-site/
+
+# Common suffix for any future DVC-managed dataset directory
+*.dvcdata/
+
+# Current datasets (tracked with DVC, never directly with Git)
+/organized_videos/
+/ThermalDetection/images_thermal_train/
+/ThermalDetection/images_thermal_val/
+/ThermalDetection/video_thermal_test/
+/ThermalDetection/thermal_live_detection/data/bu_tiv/
+/ThermalDetection/thermal_live_detection/results/
+/ThermalDlss/thermal database/organized_videos/
+/ThermalDlss/thermal database/thermal_dataset_degraded/
+/ThermalDlss/thermal database/thermal_dataset_split/
+
+# Model/training artifacts (use DVC for files that must be shared)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+/ThermalDlss/evaluation_results/
+/ThermalDlss/live_snapshots/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

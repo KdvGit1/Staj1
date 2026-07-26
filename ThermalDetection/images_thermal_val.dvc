@@ -1,0 +1,6 @@
+outs:
+- md5: 5a865a06262ebd0da5f2d5b25a738da6.dir
+  size: 487899950
+  nfiles: 2292
+  hash: md5
+  path: images_thermal_val

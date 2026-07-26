@@ -1,0 +1,6 @@
+outs:
+- md5: 2480e1903905d6705b1a75a7cc1f4486.dir
+  size: 1500935213
+  nfiles: 15635
+  hash: md5
+  path: thermal_dataset_split

@@ -1,0 +1,6 @@
+outs:
+- md5: e57e5ef4826c609de421a367cc587518.dir
+  size: 1377822101
+  nfiles: 7502
+  hash: md5
+  path: video_thermal_test

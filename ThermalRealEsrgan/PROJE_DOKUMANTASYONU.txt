@@ -1,0 +1,660 @@
+TERMAL GÖRÜNTÜLER İÇİN REAL-ESRGAN TABANLI SÜPER ÇÖZÜNÜRLÜK
+VE YOLO26N DESTEKLİ AI ZOOM SİSTEMİ
+=============================================================
+
+Doküman türü : Proje tasarım ve geliştirme planı
+Tarih        : 23 Temmuz 2026
+Durum        : İlk teknik taslak
+
+
+1. PROJENİN AMACI
+=================
+
+Bu projenin amacı, düşük çözünürlüklü bir termal kameradan alınan
+160x120 piksel görüntüleri süper çözünürlük ve obje tespiti yöntemleriyle
+daha kullanılabilir hâle getirmektir.
+
+Mevcut sistemde:
+
+1. Termal kameradan 160x120 çözünürlüklü görüntü alınmaktadır.
+2. Görüntü, özel olarak eğitilmiş EDSR modeliyle 4 kat büyütülmektedir.
+3. Büyütülmüş görüntü üzerinde özel olarak eğitilmiş YOLO26n modeliyle
+   obje tespiti yapılmaktadır.
+4. Yeni eklenecek özellikte kullanıcı veya YOLO tarafından seçilen bir
+   görüntü bölgesi Real-ESRGAN ile görsel olarak iyileştirilecektir.
+
+Real-ESRGAN çıktısı yalnızca görüntüleme ve kozmetik yakınlaştırma
+amacıyla kullanılacaktır. Sıcaklık ölçümü, güvenlik kararı veya asıl
+obje tespiti Real-ESRGAN çıktısına dayandırılmayacaktır.
+
+
+2. ÖNERİLEN GENEL MİMARİ
+========================
+
+Önerilen veri hattı:
+
+    160x120 termal görüntü
+              |
+              v
+       Mevcut EDSR x4
+              |
+              v
+      640x480 içerik görüntüsü
+              |
+              +--------------------+
+              |                    |
+              v                    v
+       YOLO26n tespiti       Temiz görüntüden ROI
+                                   |
+                                   v
+                          Real-ESRGAN x4
+                                   |
+                                   v
+                     Sensöre göre toplam x16 zoom
+
+Bu tasarımda EDSR tarafından üretilmiş x4 görüntünün yalnızca seçilmiş
+bölgesine Real-ESRGAN x4 uygulanır. Böylece orijinal sensör görüntüsüne
+göre toplam büyütme x16 olur.
+
+EDSR çıktısına ayrıca Real-ESRGAN x16 uygulanması önerilmez. Böyle bir
+durum sensöre göre toplam x64 büyütme üretir. Örneğin 640x512 bir
+görüntünün x16 büyütülmesi 10240x8192, yani yaklaşık 84 megapiksel
+çıktı oluşturur. Bu yaklaşım yüksek GPU belleği kullanır ve gerçek bilgi
+yerine çok miktarda yapay ayrıntı üretme riski taşır.
+
+
+3. GÖRÜNTÜ BOYUTLARI VE GEOMETRİ
+================================
+
+160x120 çözünürlüğün geometrik olarak tam x4 karşılığı:
+
+    160 x 4 = 640
+    120 x 4 = 480
+
+Dolayısıyla gerçek x4 çıktı 640x480 olmalıdır.
+
+640x512 görüntünün tam x4 küçültülmüş karşılığı ise:
+
+    640 / 4 = 160
+    512 / 4 = 128
+
+Yani 640x512 -> 160x128 olur. 160x120 olmaz.
+
+Kamera gerçekten 160x120 ise eğitim ve çalışma geometrisinin aynı
+olması için önerilen yöntem:
+
+    HR 640x512
+        |
+        | Dikey eksenden toplam 32 piksel crop
+        v
+    HR 640x480
+        |
+        | Bicubic x4 downsample
+        v
+    LR 160x120
+
+Crop merkezden sabit olarak veya eğitim sırasında dikey konumu rastgele
+seçilerek yapılabilir. Etiketli objeler varsa bounding box koordinatları
+crop miktarına göre güncellenmelidir.
+
+Alternatif olarak 160x120 görüntü üstten ve alttan dörder piksel
+reflection/replicate padding ile 160x128 yapılabilir. Modelin ürettiği
+padded bölümler gerçek görüntü bilgisi içermediği için bu bölgeler loss
+hesabında maskelenmelidir.
+
+160x120 görüntünün doğrudan 640x512 boyutuna esnetilmesi önerilmez.
+Bu işlem yatayda x4, dikeyde yaklaşık x4.2667 ölçek kullanır ve obje
+geometrisini bozar.
+
+Her geometrik dönüşüm metadata olarak saklanmalıdır:
+
+    x_yeni = x_eski * scale_x + pad_x
+    y_yeni = y_eski * scale_y + pad_y
+
+Saklanması gereken temel bilgiler:
+
+- Orijinal görüntü boyutu
+- EDSR giriş ve çıkış boyutu
+- scale_x ve scale_y
+- pad_x ve pad_y
+- Crop başlangıç koordinatları
+- ROI koordinatları
+- Real-ESRGAN ölçeği
+
+
+4. ROI VE AI ZOOM ÇALIŞMA ŞEKLİ
+===============================
+
+ROI (Region of Interest) üç farklı şekilde seçilebilir:
+
+1. Kullanıcı görüntü üzerinde elle dikdörtgen seçer.
+2. Kullanıcı bir YOLO tespit kutusuna tıklar.
+3. Belirli obje sınıfları otomatik olarak zoom kuyruğuna alınır.
+
+YOLO kutusu doğrudan kırpılmamalıdır. Objenin çevresindeki bağlamı
+korumak için kutu yaklaşık yüzde 15-25 genişletilmelidir.
+
+Örnek:
+
+    YOLO kutusu
+        |
+        | Yüzde 20 bağlam ekleme
+        v
+    Görüntü sınırlarına kırpılmış ROI
+        |
+        v
+    Real-ESRGAN x4
+
+ROI kesinlikle bounding box, sınıf adı ve güven skoru çizilmeden önceki
+temiz görüntüden alınmalıdır. Aksi durumda Real-ESRGAN çizgileri ve
+yazıları gerçek görüntü ayrıntısı gibi işlemeye çalışabilir.
+
+Görüntü sınırına yakın ROI'lerde reflection padding kullanılmalıdır.
+Çok küçük kutular için minimum ROI boyutu belirlenmelidir. Örneğin
+7x5 piksel bir kutu tek başına işlenmemeli, etrafına bağlam eklenerek
+en az yaklaşık 24-32 piksel giriş alanı oluşturulmalıdır.
+
+
+5. DEĞİŞKEN ROI BOYUTLARI
+=========================
+
+Real-ESRGAN generator tamamen convolutional bir yapı olduğu için tek
+tek işlenen ROI'lerin farklı genişlik ve yükseklikte olması genellikle
+model input hatasına neden olmaz.
+
+Asıl boyut problemi batch oluştururken meydana gelir. Örneğin:
+
+    ROI-1: 50x40
+    ROI-2: 80x72
+
+Bu iki görüntü aynı tensor batch'i içine doğrudan konulamaz.
+
+Çözüm seçenekleri:
+
+- ROI'leri tek tek işlemek
+- Benzer boyutlu ROI'leri bucket gruplarına ayırmak
+- Reflection padding ile ortak boyuta tamamlamak
+- Eğitimde sabit boyutlu HR/LR patch kullanmak
+
+İlk sürümde ROI'lerin tek tek işlenmesi önerilmektedir.
+
+Inference öncesinde ROI, 4 veya 8'in katına reflection padding ile
+tamamlanabilir. İşlem sonunda büyütülmüş padding alanı çıkarılır.
+
+Örnek:
+
+    53x41 ROI
+        |
+        | Padding
+        v
+    56x48
+        |
+        | Real-ESRGAN x4
+        v
+    224x192
+        |
+        | Padding alanını çıkar
+        v
+    212x164 sonuç
+
+YOLO'ya gönderilen görüntüler aspect ratio korunarak sabit imgsz
+boyutuna letterbox edilmelidir. Görüntünün yatay veya dikey olarak
+esnetilmesi önerilmez.
+
+
+6. TERMAL GÖRÜNTÜ VE RENK PALETİ
+================================
+
+Hazır Real-ESRGAN modelleri doğal RGB görüntüler üzerinde geliştirilmiş
+olduğu için termal görüntüler modelin orijinal eğitim dağılımından
+farklıdır.
+
+Mümkünse Real-ESRGAN'a renk paleti uygulanmış görüntü verilmemelidir.
+Önerilen işlem:
+
+    Normalize edilmiş termal yoğunluk
+              |
+              | Gerekirse üç kanala kopyala
+              v
+         Real-ESRGAN
+              |
+              | Tek kanala geri dön
+              v
+       Termal renk paletini uygula
+
+Iron, jet, inferno veya benzeri paletteki renklerin SR işleminden sonra
+uygulanması, modelin yapay sıcaklık renkleri üretme riskini azaltır.
+
+Real-ESRGAN çıktısı:
+
+- Sıcaklık ölçümü için kullanılmamalıdır.
+- Radyometrik veri olarak değerlendirilmemelidir.
+- Asıl tespit kararının kaynağı olmamalıdır.
+- Arayüzde "AI ile iyileştirilmiştir / yalnızca görselleştirme" şeklinde
+  işaretlenmelidir.
+
+
+7. SIFIRDAN EĞİTİM VEYA FINE-TUNE KARARI
+========================================
+
+Bu proje için önerilen yöntem fine-tune işlemidir.
+
+Nedenleri:
+
+- Pretrained generator temel kenar, kontur ve büyütme filtrelerini
+  öğrenmiş durumdadır.
+- Termal datasetler genellikle doğal görüntü datasetlerinden daha az
+  çeşitlidir.
+- GAN'i sıfırdan eğitmek daha kararsızdır.
+- Fine-tune, daha az veri ve daha kısa eğitim süresiyle iyi başlangıç
+  sağlar.
+
+Önerilen ağırlık başlangıçları:
+
+- Generator: Pretrained Real-ESRNet veya RealESRGAN_x4plus
+- Discriminator: Termal veriye özel olarak sıfırdan
+
+Generator'ın yalnızca son katmanları değil, bütün katmanları kontrollü
+bir learning rate ile fine-tune edilmelidir.
+
+İlk deneyde termal görüntü üç kanala kopyalanarak RGB mimarisi
+korunabilir. Nihai sürümde tek kanallı mimariye geçilmek istenirse ilk
+ve son convolution katmanları dönüştürülür, ara RRDB ağırlıkları
+korunur.
+
+
+8. LR-HR ÇİFTLERİNİN OLUŞTURULMASI
+==================================
+
+Mevcut yaklaşım:
+
+    Gerçek HR termal görüntü
+              |
+              | Bicubic x4 downsample
+              v
+        Sentetik LR görüntü
+
+Bu yöntem denetimli eğitime başlamak için uygundur ancak yalnızca
+bicubic degradation kullanılması gerçek kamerayı tam olarak temsil
+etmez.
+
+Gerçek termal kamera görüntülerinde şu bozulmalar bulunabilir:
+
+- Sensör ve optik bulanıklığı
+- Fixed-pattern noise
+- Satır/sütun gürültüsü
+- Dead veya hot pixel
+- Sinyal seviyesine bağlı gürültü
+- AGC/kontrast dönüşümü
+- 8, 14 veya 16-bit quantization
+- Kullanılıyorsa görüntü sıkıştırması
+
+Önerilen sentetik degradation hattı:
+
+    HR
+     |
+     v
+    Hafif termal blur veya tahmini sensör PSF
+     |
+     v
+    Bicubic/area ile x4 downsample
+     |
+     v
+    Sinyal seviyesine bağlı gürültü
+     |
+     v
+    Fixed-pattern/satır-sütun gürültüsü
+     |
+     v
+    Quantization ve gerçek kamera AGC benzetimi
+     |
+     v
+    LR
+
+Aynı HR görüntüden eğitim sırasında farklı LR örnekleri çevrim içi
+üretilmesi önerilir. Datasetin bir bölümü sadece bicubic bırakılarak
+kontrol grubu oluşturulabilir.
+
+Train, validation ve test ayrımı rastgele kare bazında değil, video,
+sekans, ortam veya sahne bazında yapılmalıdır. Aynı videonun ardışık
+karelerinin farklı split'lere düşmesi veri sızıntısına neden olur.
+
+
+9. EĞİTİM LOSS'LARI
+====================
+
+Önerilen genel generator loss'u:
+
+    L_total =
+        lambda_rec  * L_rec
+      + lambda_edge * L_edge
+      + lambda_ssim * L_ssim
+      + lambda_cons * L_cons
+      + lambda_task * L_YOLO
+      + lambda_gan  * L_GAN
+
+Loss bileşenleri:
+
+L_rec:
+    SR görüntü ile gerçek HR görüntü arasındaki Charbonnier veya L1
+    rekonstrüksiyon kaybıdır. Termal doğruluğun temel koruyucusudur.
+
+L_edge:
+    Sobel veya Laplacian ile hesaplanan kenar farkıdır. Obje sınırlarının
+    korunmasına yardımcı olur.
+
+L_ssim:
+    SR ve HR arasındaki yapısal benzerlik kaybıdır.
+
+L_cons:
+    SR görüntünün yeniden küçültüldüğünde giriş LR görüntüsüyle uyumlu
+    olmasını sağlar.
+
+    L_cons = | Downsample(G(LR)) - LR |
+
+L_YOLO:
+    Dondurulmuş YOLO26n üzerinden hesaplanan görev kaybıdır.
+
+L_GAN:
+    Görüntünün algısal gerçekçiliğini artırmayı amaçlayan adversarial
+    kayıptır. Hallucination riski nedeniyle düşük ağırlıkla ve yalnızca
+    eğitimin son aşamasında kullanılmalıdır.
+
+
+10. YOLO26N MODELİNİN LOSS OLARAK KULLANILMASI
+==============================================
+
+YOLO'nun SR eğitiminde kullanılması task-driven super-resolution
+yaklaşımıdır. Amaç yalnızca piksel benzerliği değil, SR çıktısının obje
+tespiti için de yararlı olmasıdır.
+
+Ancak YOLO loss tek başına hallucination önleyici değildir. Generator,
+YOLO'nun kolay tespit ettiği fakat insan gözü açısından gerçek olmayan
+desenler üretebilir. Bu nedenle:
+
+- YOLO loss düşük ağırlıkla kullanılmalıdır.
+- Güçlü bir rekonstrüksiyon loss korunmalıdır.
+- YOLO ağırlıkları başlangıçta tamamen dondurulmalıdır.
+- Aynı YOLO hem yönlendirici hem tek değerlendirme modeli olmamalıdır.
+- Sonuçlar bağımsız validation/test görüntülerinde kontrol edilmelidir.
+
+YOLO ağırlıklarının dondurulması:
+
+    for parameter in yolo.parameters():
+        parameter.requires_grad = False
+
+YOLO ağırlıkları dondurulsa da bütün YOLO forward işlemi torch.no_grad()
+içine alınmamalıdır. Gradient'in YOLO girişinden SR generator'a geri
+akabilmesi gerekir.
+
+model.predict() ve son NMS kutuları doğrudan loss olarak kullanılmamalı;
+YOLO'nun eğitim forward'u ve detection criterion'u kullanılmalıdır.
+
+
+11. TASK LOSS SEÇENEKLERİ
+=========================
+
+11.1. Standart Detection Loss
+-----------------------------
+
+    L_det = YOLOLoss(YOLO(SR), ground_truth)
+
+Bu loss sınıf, obje ve kutu doğruluğu üzerinden generator'ı yönlendirir.
+
+
+11.2. HR-SR Ranking Loss
+------------------------
+
+SR görüntü, HR görüntüye göre belirgin şekilde daha zor tespit
+edildiğinde generator cezalandırılabilir:
+
+    L_rank = max(0, L_det(SR) - stopgrad(L_det(HR)) - margin)
+
+Bu yaklaşım generator'a "HR'den daha iyi ol" demek yerine, "SR çıktıyı
+HR'ye göre belirgin şekilde daha zor tespit edilir hâle getirme" hedefi
+verir.
+
+
+11.3. YOLO Feature Distillation Loss
+------------------------------------
+
+YOLO backbone ara özellikleri kullanılabilir:
+
+    L_feat = Toplam | F_k(SR) - stopgrad(F_k(HR)) |
+
+Burada F_k, YOLO backbone'un belirli katmanlarının özellik haritalarıdır.
+Bu loss, yalnızca son class/box loss'una göre daha kararlı olabilir ve
+SR görüntüsünün HR görüntüye benzer görev özellikleri üretmesini sağlar.
+
+Önerilen task loss:
+
+    L_task = L_det + alpha * L_rank + beta * L_feat
+
+alpha ve beta değerleri validation sonuçlarına ve loss/gradient
+büyüklüklerine göre ayarlanmalıdır.
+
+
+12. PATCH VE ETİKET YÖNETİMİ
+============================
+
+SR eğitimi sırasında sabit boyutlu patch kullanılması batch oluşturmayı
+kolaylaştırır. Ancak YOLO loss kullanılacaksa objelerin crop içindeki
+etiketleri doğru şekilde dönüştürülmelidir.
+
+Her crop işleminde:
+
+- Bounding box koordinatları crop başlangıcına göre taşınmalıdır.
+- Görüntü dışında kalan kutular kırpılmalıdır.
+- Çok az kısmı görünür kalan objeler yok sayılmalıdır.
+- Boş arka plan patch'leri tamamen kaldırılmamalıdır.
+
+Önerilen örnekleme:
+
+- Patch'lerin yaklaşık yarısı obje merkezli
+- Diğer yarısı rastgele arka plan ve çevre örnekleri
+
+Çok sıkı obje crop'ları YOLO'nun ihtiyaç duyduğu çevresel bağlamı
+kaybettirebilir. Obje merkezli crop'larda ek bağlam bırakılmalıdır.
+
+
+13. ÖNERİLEN EĞİTİM AŞAMALARI
+==============================
+
+AŞAMA 0 - Veri ve Geometri Doğrulaması
+--------------------------------------
+
+- Kamera çözünürlüğünün gerçekten 160x120 olup olmadığını doğrula.
+- 640x512 ile 160x120 arasındaki crop/padding dönüşümünü sabitle.
+- Termal görüntünün bit derinliğini ve AGC hattını belgele.
+- Dataset split'lerini sekans/sahne bazında oluştur.
+- YOLO etiket dönüşümlerini test et.
+
+
+AŞAMA 1 - Termal Real-ESRNet Fine-Tune
+--------------------------------------
+
+GAN ve YOLO kapalı tutulur.
+
+    L = L_rec + L_edge + L_ssim + L_cons
+
+Amaç, önce termal yoğunluğu ve obje geometrisini doğru şekilde yeniden
+oluşturmaktır.
+
+Takip edilecek metrikler:
+
+- Validation L1/Charbonnier
+- PSNR
+- SSIM
+- Kenar hatası
+- SR tekrar küçültüldüğünde LR uyumu
+
+
+AŞAMA 2 - Task-Driven Fine-Tune
+-------------------------------
+
+YOLO26n ağırlıkları dondurulur.
+
+    L = Önceki loss'lar + düşük ağırlıklı L_task
+
+YOLO task loss küçük bir değerle başlatılıp kademeli olarak
+artırılmalıdır. Generator görüntü rekonstrüksiyonundan uzaklaşmaya
+başlarsa task loss ağırlığı azaltılmalıdır.
+
+
+AŞAMA 3 - Düşük Ağırlıklı GAN Fine-Tune
+---------------------------------------
+
+Yalnızca görüntüler fazla pürüzsüz kalıyorsa discriminator devreye
+alınır.
+
+    L = Önceki loss'lar + çok düşük ağırlıklı L_GAN
+
+Hallucination önemli bir risk olduğu için GAN loss standart
+Real-ESRGAN tarifinden daha düşük tutulabilir. Task-driven Real-ESRNet
+GAN eklenmeden yeterince iyi sonuç verirse üretim sisteminde GAN
+kullanmak zorunlu değildir.
+
+
+AŞAMA 4 - Canlı Kamera ve ROI Entegrasyonu
+------------------------------------------
+
+- EDSR ve YOLO modelleri sürekli çalışır.
+- Real-ESRGAN yalnızca seçilmiş ROI üzerinde çalışır.
+- İlk sürümde tek kare/snapshot zoom kullanılır.
+- Son istek öncelikli "latest frame wins" kuyruğu kullanılır.
+- Model ağırlıkları uygulama başında bir kere yüklenir.
+- torch.inference_mode() ve destekleniyorsa CUDA FP16 kullanılır.
+- YOLO ve Real-ESRGAN GPU işlemleri gerektiğinde sıraya alınır.
+- Bellek yetersizse tile inference kullanılır.
+
+
+14. GAN HALLUCINATION RİSKİNİN KONTROLÜ
+=======================================
+
+Hallucination'ı azaltmak için:
+
+- Generator önce GAN'sız eğitilmelidir.
+- Güçlü HR rekonstrüksiyon kaybı korunmalıdır.
+- GAN loss düşük ağırlıklı olmalıdır.
+- YOLO loss düşük ağırlıklı olmalıdır.
+- Downsample consistency loss kullanılmalıdır.
+- Termal yoğunluk ve renk paleti ayrı tutulmalıdır.
+- SR çıktısı üzerinden sıcaklık veya ana tespit kararı verilmemelidir.
+- SR ve HR görüntüler yan yana denetlenmelidir.
+- Yanlış pozitif oluşturan dokular ayrıca raporlanmalıdır.
+
+YOLO loss'un artması veya azalması tek başına görüntünün fiziksel olarak
+doğru olduğunu göstermez. Generator belirli bir YOLO modelinin zayıf
+noktalarına uyum sağlayabilir. Bu nedenle mümkünse aynı görüntüler
+başka bir detector checkpoint'i veya farklı bir detector mimarisiyle
+de test edilmelidir.
+
+
+15. DEĞERLENDİRME PLANI
+=======================
+
+Karşılaştırılacak sistemler:
+
+1. Bicubic x4 + YOLO
+2. Mevcut EDSR x4 + YOLO
+3. Termal Real-ESRNet x4 + YOLO
+4. Task-driven termal Real-ESRNet x4 + YOLO
+5. Task-driven termal Real-ESRGAN x4 + YOLO
+
+Görüntü metrikleri:
+
+- PSNR
+- SSIM
+- L1/Charbonnier hata
+- Kenar benzerliği
+- LPIPS, yalnızca yardımcı algısal metrik olarak
+
+Tespit metrikleri:
+
+- mAP50
+- mAP50-95
+- Precision
+- Recall
+- Küçük objelerde recall
+- Sınıf başına AP
+- Yanlış pozitif ve yanlış negatif sayısı
+
+Sistem metrikleri:
+
+- Ortalama inference süresi
+- P50 ve P95 zoom gecikmesi
+- Maksimum GPU belleği
+- ROI boyutuna göre inference süresi
+- Canlı yayında ulaşılan FPS
+- Ardışık karelerde flicker/titreşim
+
+Manuel kalite kontrolü:
+
+- Obje şekli değişiyor mu?
+- Yeni ve gerçekte olmayan kenarlar oluşuyor mu?
+- İnsan/araç/ürün parçaları yapay olarak çoğalıyor mu?
+- Kenarlarda halo veya ringing oluşuyor mu?
+- Termal bölgeler arasında gerçek dışı renk geçişleri var mı?
+- Model, YOLO kutu veya yazılarını büyütüyor mu?
+
+
+16. BAŞARI KRİTERLERİ
+=====================
+
+İlk başarılı prototip aşağıdaki özellikleri sağlamalıdır:
+
+- 160x120 kamera geometrisi doğru şekilde korunmalıdır.
+- EDSR ve YOLO'nun mevcut sonuçları zoom modülünden etkilenmemelidir.
+- Kullanıcı bir YOLO kutusuna tıklayabilmelidir.
+- Kutu otomatik olarak bağlam eklenerek genişletilmelidir.
+- Temiz ROI Real-ESRGAN ile x4 büyütülmelidir.
+- Sensör görüntüsüne göre toplam x16 görsel zoom elde edilmelidir.
+- Farklı ROI boyutları hata üretmemelidir.
+- Zoom işlemi sıcaklık ve ana tespit hattından ayrılmalıdır.
+- AI ile oluşturulan görüntü açıkça işaretlenmelidir.
+- Task-driven model, yalnızca EDSR/bicubic baseline'a göre tespit
+  performansını validation ve gerçek kamera testlerinde artırmalıdır.
+- Tespit artışı ciddi hallucination veya yanlış pozitif artışı
+  pahasına gerçekleşmemelidir.
+
+
+17. ÖNERİLEN İLK ÜRETİM SÜRÜMÜ
+===============================
+
+İlk üretim sürümünün kapsamı:
+
+1. 160x120 termal kare alınır.
+2. Mevcut EDSR modeliyle gerçek geometrisi korunarak x4 büyütülür.
+3. Temiz EDSR çıktısında YOLO26n obje tespiti yapılır.
+4. Kullanıcı bir tespit kutusuna tıklar.
+5. Kutu yaklaşık yüzde 20 bağlam ile genişletilir.
+6. ROI temiz EDSR görüntüsünden alınır.
+7. Termal veriye fine-tune edilmiş Real-ESRNet/Real-ESRGAN x4
+   uygulanır.
+8. Sensör görüntüsüne göre toplam x16 AI zoom gösterilir.
+9. Görüntü "AI ile iyileştirilmiştir" olarak işaretlenir.
+10. Tespit ve sıcaklık hesabı değiştirilmeden mevcut güvenilir hattan
+    devam eder.
+
+
+18. SONUÇ VE TEKNİK KARAR
+=========================
+
+Bu proje için önerilen temel karar:
+
+    Pretrained x4 generator'dan başlanacak, model termal dataset
+    üzerinde önce GAN'sız fine-tune edilecek, daha sonra dondurulmuş
+    YOLO26n feature/detection loss'u düşük ağırlıkla eklenecek ve
+    yalnızca gerekli görülürse düşük ağırlıklı GAN fine-tune
+    uygulanacaktır.
+
+Bu yaklaşım:
+
+- Sıfırdan GAN eğitimine göre daha kararlı,
+- Termal dataset için daha veri verimli,
+- Tespit performansına duyarlı,
+- Hallucination riskini daha kontrollü,
+- Mevcut EDSR ve YOLO sistemine eklenmesi daha kolay
+
+bir çözüm sunmaktadır.
+

@@ -1,0 +1,6 @@
+outs:
+- md5: 65c5928e543a2a1521971445d652fcb6.dir
+  size: 4620383074
+  nfiles: 21487
+  hash: md5
+  path: images_thermal_train

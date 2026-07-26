@@ -1,0 +1,8 @@
+# Python 3.10+ is required by this project.
+# Install the correct CUDA-enabled PyTorch build for the target NVIDIA system
+# before this file. Ultralytics will reuse that installation.
+ultralytics==8.4.102
+numpy>=1.26,<3
+Pillow>=10,<13
+PyYAML>=6,<7
+

@@ -1,0 +1,574 @@
+CANLI TERMAL EDSR + NESNE TESPİTİ
+ÇALIŞMA, VERİ TOPLAMA, ETİKETLEME VE ÖRNEK ÇOĞALTMA REHBERİ
+================================================================
+
+1. BU SİSTEMİN TEMEL AMACI
+--------------------------
+
+Sistemin iki ayrı görevi vardır:
+
+1) Kameradan gelen termal görüntü üzerinde canlı nesne tespiti yapmak.
+2) Mevcut modeli gerçek MOBESE kamerasına uyarlamak için yeni, düzenli ve
+   etiketlenebilir bir veri seti üretmek.
+
+İnternetten uygun yeni termal veri seti bulamadığımız için en değerli veri
+kaynağı doğrudan kullanılacak kameradır. Böylece model; kameranın açısını,
+termal paletini, çözünürlüğünü, sıkıştırma artefaktlarını, gece-gündüz
+koşullarını ve sahnedeki gerçek nesne büyüklüklerini öğrenebilir.
+
+Sistem ilk çalıştırıldığı anda modeli otomatik olarak eğitmez. Önce kamera
+verisini toplar ve mevcut modelin tahminlerini ön-etiket olarak kaydeder.
+İnsan tarafından kontrol edilen bu örnekler daha sonra mevcut eğitim verisine
+eklenerek model yeniden eğitilir veya fine-tune edilir.
+
+
+2. CANLI GÖRÜNTÜ GELDİĞİNDE NE OLUYOR?
+--------------------------------------
+
+İşlem sırası şöyledir:
+
+Hikvision RTSP akışı
+    |
+    v
+En güncel kamera karesi
+    |
+    v
+Gri ton ve 160x120 EDSR girdisi
+    |
+    v
+EDSR ile 4 kat büyütme: 640x480
+    |
+    v
+Oranı bozmadan üst-alt letterbox dolgusu: 640x512
+    |
+    v
+YOLO26n nesne tespiti
+    |
+    v
+person / bike_motorcycle / car sonuçları
+    |
+    v
+İstenirse görüntü, kutular, güven skorları ve metadata kaydı
+
+2.1. RTSP okuma
+
+Kareler Hikvision kameranın 201 veya 202 kanalından OpenCV/FFmpeg ile alınır.
+Okuyucu uzun bir görüntü kuyruğu oluşturmaz; daima en yeni çözülen kareyi
+tutmaya çalışır. Amaç, eski kareleri sırayla işleyip canlı görüntünün gerisinde
+kalmamaktır.
+
+2.2. 160x120 giriş
+
+Kameradan gelen görüntü önce gri tona çevrilir ve 160x120 boyutuna indirilir.
+Bu, EDSR modelinin canlı kamera demosunda kullandığı gerçek giriş biçimidir.
+Bu görüntü "native_frames" klasörüne de kaydedilir. Böylece EDSR'nin gerçekte
+hangi bilgiyi gördüğü daha sonra kontrol edilebilir.
+
+2.3. EDSR x4
+
+EDSR, 160x120 görüntüyü 640x480 boyutuna büyütür. Bicubic büyütmeden farklı
+olarak öğrenilmiş kenarlar ve termal şekiller üretmeye çalışır.
+
+Ancak EDSR gerçekte kamerada bulunmayan fiziksel bilgiyi yaratamaz. Bazı
+durumlarda nesneye benzeyen yapay kenarlar veya artefaktlar oluşturabilir.
+Bu nedenle EDSR çıktısı yardımcı bir görüntüdür; mutlak gerçek olarak kabul
+edilmez.
+
+2.4. 640x512 letterbox
+
+Mevcut YOLO modeli 640x512 görüntülerle eğitildi. EDSR çıktısı ise 640x480'dir.
+Görüntüyü dikey olarak esnetmek insan ve araç geometrisini bozardı.
+
+Bu nedenle 640x480 içerik değiştirilmeden korunur, üst ve alta 16'şar piksel
+dolgu eklenerek 640x512 yapılır. YOLO'ya verilen ve daha sonra etiketlenecek
+asıl görüntü budur.
+
+2.5. YOLO tespiti
+
+YOLO şu üç sınıfı arar:
+
+0 = person
+1 = bike_motorcycle
+2 = car
+
+Model her kutu için sınıf ve güven skoru üretir. Varsayılan olarak geleneksel
+NMS kullanılır. Önceki değerlendirme sonuçlarında bu yöntem end-to-end
+seçeneğinden biraz daha iyi sonuç verdiği için ana yöntem olarak bırakılmıştır.
+
+
+3. BU SİSTEM BİZE NE KAZANDIRACAK?
+----------------------------------
+
+3.1. Hedef kameraya uyum
+
+Eski veri seti farklı kameralar, açılar veya termal koşullar içerebilir.
+Toplanacak yeni görüntüler doğrudan üretimde kullanılacak kameradan geleceği
+için domain farkını azaltır.
+
+3.2. Modelin hatalarını bulma
+
+Sistem yalnızca yüksek güvenli tespitleri değil, belirli güven aralığındaki
+kararsız tahminleri de kaydedebilir. Böylece şu tür örnekler bulunabilir:
+
+- modelin tamamen kaçırdığı kişi veya araçlar;
+- kişi ile sıcak arka planı karıştırdığı durumlar;
+- uzak ve küçük nesneler;
+- motosiklet/bisiklet sınıfının kaçırıldığı kareler;
+- örtülü veya görüntü kenarında kalan nesneler;
+- boş görüntüde yapılan yanlış pozitif tespitler.
+
+3.3. Ön-etiket üretme
+
+Modelin mevcut tahminleri YOLO biçiminde kaydedilir. Etiketçi her kutuyu
+sıfırdan çizmek yerine mevcut öneriyi düzeltebilir. Bu, etiketleme süresini
+azaltır.
+
+Ön-etiket hiçbir zaman otomatik olarak doğru kabul edilmez. Mevcut modelin
+kaçırdığı nesneler ön-etikette bulunmayacağı için her görüntü baştan sona
+insan tarafından kontrol edilmelidir.
+
+3.4. EDSR gerçekten faydalı mı sorusunu cevaplama
+
+Aynı kamera görüntüsü üç farklı biçimde YOLO'ya verilebilir:
+
+- edsr: 160x120 -> EDSR -> 640x480 -> letterbox
+- bicubic: 160x120 -> bicubic -> 640x480 -> letterbox
+- source: RTSP'den çözülen kaynak görüntü -> letterbox
+
+Aynı insan etiketleri üzerinde bu üç yöntem karşılaştırılarak EDSR'nin yalnızca
+görüntüyü güzel gösterip göstermediği değil, tespit başarısını gerçekten
+artırıp artırmadığı ölçülebilir.
+
+
+4. KARELER NASIL KAYDEDİLİR?
+----------------------------
+
+Her program çalıştırması ayrı bir oturum klasörü oluşturur:
+
+thermal_live_detection/captures/session_<UTC_TARIHI>/
+
+İçindeki klasörler:
+
+source_frames/
+    RTSP çözücüsünden gelen kaynak görüntülerdir. Kamera gerçeğini kontrol etmek
+    için saklanır.
+
+native_frames/
+    EDSR'ye verilen 160x120 gri görüntülerdir.
+
+sr_frames/
+    EDSR'nin ürettiği 640x480 görüntülerdir.
+
+detector_inputs/
+    YOLO'ya gerçekten verilen 640x512 görüntülerdir. Eğitim için etiketlenecek
+    kanonik görüntü budur.
+
+previews/
+    Mevcut modelin kutuları çizilmiş inceleme görüntüleridir. Eğitim görüntüsü
+    olarak kullanılmaz.
+
+pseudo_labels/
+    Modelin önerdiği YOLO etiketleridir. İnsan onayı olmadan eğitimde
+    kullanılmaz.
+
+session.json
+    Kamera, sınıflar, seçilen giriş biçimi ve kayıt politikası gibi oturum
+    bilgilerini içerir.
+
+metadata.jsonl
+    Her görüntü için zaman, yakalama nedeni, görüntü şekilleri, tespit güvenleri
+    ve EDSR/YOLO sürelerini içerir.
+
+Görüntüler JPEG yerine PNG kaydedilir. Böylece tekrar JPEG sıkıştırmasından
+kaynaklanan yeni artefaktlar oluşmaz.
+
+
+5. KAYIT MODLARI
+----------------
+
+5.1. manual
+
+Kullanıcı pencerede "s" tuşuna bastığında kare kaydedilir.
+
+İlk denemede kullanılması önerilir. Kamera görüntüsü, EDSR sonucu, tespit
+kutuları ve klasör yapısı kontrol edilir.
+
+Avantajı:
+    Özellikle seçilen sahneler kaydedilebilir.
+
+Dezavantajı:
+    Kullanıcı görmediği veya gözden kaçırdığı zor örnekleri kaçırabilir.
+
+5.2. interval
+
+Belirli bir zaman aralığında, önceki kayıttan yeterince farklı olan kareleri
+kaydeder. Varsayılan aralık 10 saniyedir.
+
+Bu mod, model hiçbir nesne tespit etmese bile görüntü toplar. Kaçırılan
+nesneleri ve boş negatif sahneleri bulmak için önemlidir.
+
+5.3. detections
+
+Bir tespit veya kararsız tespit oluştuğunda kare kaydeder.
+
+Avantajı:
+    Nesne bulunan karelere ağırlık verir.
+
+Dezavantajı:
+    Modelin tamamen kaçırdığı nesneler kayıt tetiklemeyebilir.
+
+5.4. hybrid
+
+Interval ve detection yöntemlerini birlikte kullanır. Gerçek veri toplama için
+önerilen ana moddur.
+
+Hem modelin gördüğü olayları hem de modelin hiçbir şey görmediği fakat sahnenin
+değiştiği kareleri toplar.
+
+
+6. ETİKET DOSYASI NASIL ÇALIŞIR?
+--------------------------------
+
+Her detector_inputs görüntüsüyle aynı ada sahip bir TXT etiketi bulunur.
+
+Örnek:
+
+Görüntü:
+detector_inputs/20260724T120000_frame000001.png
+
+Etiket:
+pseudo_labels/20260724T120000_frame000001.txt
+
+Bir etiket satırı:
+
+2 0.50000000 0.60000000 0.20000000 0.15000000
+
+Alanların anlamı:
+
+2          = car sınıfı
+0.50000000 = kutu merkezinin görüntü genişliğine oranı
+0.60000000 = kutu merkezinin görüntü yüksekliğine oranı
+0.20000000 = kutu genişliğinin görüntü genişliğine oranı
+0.15000000 = kutu yüksekliğinin görüntü yüksekliğine oranı
+
+Tüm koordinatlar 0 ile 1 arasındadır. Güven skoru etiket dosyasına yazılmaz;
+metadata.jsonl içinde saklanır.
+
+Bir görüntüde üç nesne varsa TXT dosyasında üç satır bulunur. Görüntüde hiçbir
+nesne yoksa aynı isimli boş bir TXT dosyası bulunmalıdır. Bu, görüntünün
+etiketlenmeyi unuttuğu değil, kontrol edilmiş negatif görüntü olduğu anlamına
+gelir.
+
+
+7. ÖN-ETİKET NASIL GERÇEK ETİKETE ÇEVRİLİR?
+--------------------------------------------
+
+Önerilen süreç:
+
+1) detector_inputs görüntüleri ve pseudo_labels dosyaları CVAT, Label Studio
+   veya YOLO biçimini destekleyen başka bir etiketleme aracına aktarılır.
+
+2) Etiketçi her görüntüyü açar.
+
+3) Mevcut kutular kontrol edilir:
+   - yanlış sınıf düzeltilir;
+   - çok geniş/dar kutu yeniden çizilir;
+   - olmayan nesneye çizilmiş kutu silinir.
+
+4) Modelin kaçırdığı bütün nesneler elle eklenir.
+
+5) Boş görüntüler gerçekten boşsa boş etiketle onaylanır.
+
+6) İnsan tarafından kontrol edilmiş etiketler ayrı bir reviewed_labels
+   klasörüne dışa aktarılır.
+
+7) pseudo_labels dosyalarının üzerine yazılmaz. Böylece model önerisi ile insan
+   düzeltmesi gerektiğinde karşılaştırılabilir.
+
+Etiketçi yalnızca büyütülmüş SR görüntüsüne bakmamalıdır. Aynı isimli
+source_frames ve native_frames görüntülerini de kontrol etmelidir. Yalnızca
+EDSR'de görülen fakat kaynak görüntüde hiçbir desteği olmayan şekiller gerçek
+nesne olarak etiketlenmemelidir.
+
+
+8. SINIF ETİKETLEME KURALLARI
+-----------------------------
+
+0 = person
+
+- Ayakta, yürüyen veya kısmen örtülü kişiler.
+- Motosiklet/bisiklet üzerindeki kişi ayrıca person olarak etiketlenir.
+- İnsan olduğu ayırt edilemeyecek kadar belirsiz sıcak leke zorla
+  etiketlenmez.
+
+1 = bike_motorcycle
+
+- Bisiklet ve motosiklet aynı sınıfta tutulur.
+- Üzerindeki kişi ayrıca person sınıfıdır.
+- Mevcut modelin zayıf sınıfı olduğu için bu örnekler özellikle toplanmalıdır.
+
+2 = car
+
+- Veri setindeki mevcut sınıf tanımıyla uyumlu otomobiller.
+- Yeni araç türleri eklenmeden önce mevcut etiket politikası kontrol
+  edilmelidir. Örneğin kamyonu bazen car bazen etiketsiz bırakmak modelde
+  tutarsızlık oluşturur.
+
+Genel kutu kuralları:
+
+- Kutu nesneyi sıkı biçimde çevrelemelidir.
+- Görüntü dışına çıkan nesnede kutu görüntü sınırında kesilmelidir.
+- Kısmen örtülü fakat sınıfı belli nesne etiketlenmelidir.
+- Aynı tür nesne için farklı etiketçiler aynı kuralları kullanmalıdır.
+
+
+9. "ÖRNEK ÇOĞALTMA" İKİ FARKLI ŞEYDİR
+--------------------------------------
+
+Örnek çoğaltma iki aşamada yapılabilir:
+
+A) Kameradan yeni ve gerçek örnek toplamak.
+B) Eğitim sırasında mevcut örneklere veri artırma uygulamak.
+
+Bu ikisi aynı şey değildir.
+
+
+10. KAMERADAN GERÇEK ÖRNEK ÇOĞALTMA
+------------------------------------
+
+En değerli çoğaltma yöntemidir. Amaç aynı aracın arka arkaya 100 karesini
+saklamak değil, farklı koşullar toplamaktır.
+
+Toplanması gereken çeşitlilik:
+
+- sabah, öğle, akşam ve gece;
+- sıcak ve soğuk hava;
+- yağmur, sis veya ıslak zemin;
+- az ve yoğun trafik;
+- yakın, orta ve uzak nesne;
+- küçük termal nesneler;
+- duran ve hareketli kişi/araç;
+- örtülme;
+- görüntü kenarından giren/çıkan nesne;
+- sıcak egzoz, yol, bina veya başka yanıltıcı arka plan;
+- tamamen boş sahneler;
+- modelin yanlış alarm verdiği sahneler;
+- özellikle bisiklet ve motosiklet.
+
+Ardışık 30 FPS görüntüden her kareyi kaydetmek örnek sayısını artırır fakat
+bilgi çeşitliliğini çok az artırır. Aynı nesnenin neredeyse aynı 500 karesi:
+
+- depolamayı büyütür;
+- etiketi pahalılaştırır;
+- modelin o olaya aşırı uyum sağlamasına neden olabilir;
+- train ve validation'a sızarsa sonucu yapay olarak yükseltir.
+
+Bu nedenle sistem zaman aralığı, olay aralığı ve görüntü farklılığı kullanır.
+
+Örnek ilk toplama planı:
+
+1. 10-15 dakika manual kontrol.
+2. Farklı saatlerde 30-60 dakikalık hybrid oturumlar.
+3. Oturum sonunda hızlı tekrar temizliği.
+4. Zor ve eksik sınıflardan manuel ek çekim.
+5. İnsan etiketi ve kalite kontrol.
+
+Kesin sayıdan çok çeşitlilik önemlidir. İlk çevrimde birkaç yüz farklı ve
+kontrol edilmiş kare, binlerce ardışık kopyadan daha faydalıdır.
+
+
+11. EĞİTİM SIRASINDA VERİ ARTIRMA
+---------------------------------
+
+İnsan tarafından onaylanmış gerçek görüntüler hazırlandıktan sonra eğitim
+sırasında kontrollü augmentation uygulanabilir.
+
+Termal görüntüler için genellikle yararlı olabilecek işlemler:
+
+- hafif yatay çevirme;
+- küçük ölçekleme ve öteleme;
+- sınırlı kırpma;
+- hafif blur;
+- sensör gürültüsüne benzeyen düşük seviyeli gürültü;
+- sınırlı parlaklık/kontrast veya gamma değişimi;
+- küçük miktarda termal dinamik aralık değişimi;
+- mosaic/mixup işlemlerini düşük ve kontrollü oranlarda deneme.
+
+Dikkat edilmesi gerekenler:
+
+- Dikey çevirme MOBESE görüntüsü için fiziksel olarak anlamsızdır.
+- Çok büyük döndürmeler kamera geometrisini bozabilir.
+- Aşırı kontrast ve renk dönüşümleri gerçek termal palete benzemeyebilir.
+- Aşırı blur küçük kişileri tamamen yok edebilir.
+- EDSR artefaktını tekrar tekrar augmentation ile büyütmek modeli yanlış
+  kenarlara alıştırabilir.
+- Sadece kopyala-yapıştır ile aynı bisikleti çoğaltmak gerçek çeşitlilik yerine
+  ezber oluşturabilir.
+
+Augmentation yalnızca train bölümünde uygulanmalıdır. Validation ve test
+görüntüleri gerçek kamera dağılımını değiştirmeden ölçülmelidir.
+
+
+12. TRAIN / VALIDATION / TEST NASIL BÖLÜNMELİ?
+----------------------------------------------
+
+Görüntüler tek tek rastgele bölünmemelidir.
+
+Yanlış yöntem:
+
+Aynı aracın 12:00:01, 12:00:02 ve 12:00:03 karelerini rastgele ayırıp birini
+train, birini validation, birini test yapmak.
+
+Bu durumda model validation/test içindeki nesneyi train sırasında neredeyse
+aynı biçimde görmüş olur. Sonuç olduğundan yüksek çıkar.
+
+Doğru yöntem:
+
+Bölme birimi kamera + gün + kayıt oturumu veya bağımsız zaman bloğu olmalıdır.
+
+Örnek:
+
+train:
+    Pazartesi sabah, Salı akşam, Çarşamba öğle oturumları
+
+validation:
+    Perşembe sabah bağımsız oturumu
+
+test:
+    Cuma akşam bağımsız ve sonradan değiştirilmemiş oturum
+
+Yaklaşık oranlar:
+
+train      %70-80
+validation %10-15
+test       %10-15
+
+Orandan daha önemli olan aynı olayın iki bölüme sızmamasıdır.
+
+
+13. YENİ VERİYLE MODEL NASIL GELİŞTİRİLECEK?
+---------------------------------------------
+
+Önerilen aktif öğrenme çevrimi:
+
+1) Mevcut YOLO modeli kamera üzerinde çalıştırılır.
+
+2) Manual ve hybrid kayıtlarla farklı örnekler toplanır.
+
+3) Ön-etiketler insan tarafından düzeltilir.
+
+4) Hatalar gruplandırılır:
+   - kaçırılan nesne;
+   - yanlış pozitif;
+   - yanlış sınıf;
+   - kötü kutu;
+   - küçük/uzak nesne;
+   - EDSR artefaktı.
+
+5) Eski veri seti ile yeni kamera verisi birlikte kullanılır.
+   Sadece yeni kameraya ait küçük veriyle eğitim yapmak eski bilgilerin
+   unutulmasına ve tek sahneye aşırı uyuma yol açabilir.
+
+6) Önce mevcut modele fine-tune uygulanır.
+
+7) Kilitli test oturumunda tekrar evaluation yapılır.
+
+8) En çok hata kalan koşullardan yeni veri toplanır.
+
+9) Çevrim tekrarlanır.
+
+Bu süreç, rastgele daha fazla epoch çalıştırmaktan genellikle daha değerlidir;
+çünkü modelin gerçekten eksik olduğu örnekleri eğitim verisine ekler.
+
+
+14. EDSR / BICUBIC / SOURCE KARŞILAŞTIRMASI
+-------------------------------------------
+
+EDSR modelinin PSNR ve SSIM değerleri bicubic yönteminden daha iyi çıktı.
+Ancak daha iyi PSNR her zaman daha iyi nesne tespiti anlamına gelmez.
+
+Doğru karşılaştırma:
+
+1) Aynı kamera oturumundan kareler seçilir.
+2) İnsan tarafından tek bir doğru etiket listesi hazırlanır.
+3) Aynı kareler EDSR, bicubic ve source yollarında işlenir.
+4) Aynı YOLO confidence, IoU ve NMS ayarları kullanılır.
+5) Şunlar karşılaştırılır:
+   - person precision/recall/AP;
+   - bike_motorcycle precision/recall/AP;
+   - car precision/recall/AP;
+   - yanlış pozitif sayısı;
+   - kaçırılan küçük nesne sayısı;
+   - EDSR süresi, YOLO süresi ve toplam FPS.
+
+EDSR tespiti artırmıyorsa sistem boşa gitmiş olmaz. EDSR operatör ekranında
+görsel iyileştirme için kullanılabilir, fakat YOLO girdisi bicubic veya source
+olarak seçilebilir.
+
+
+15. İLK UYGULAMA ADIMLARI
+-------------------------
+
+Adım 1 - Ortamı aç:
+
+ThermalDetection projesinde daha önce eğitim/evaluation için kullandığın Python
+ortamını etkinleştir.
+
+Adım 2 - Manual çalıştır:
+
+.\thermal_live_detection\run_live.ps1 `
+    -CameraIp "KAMERA_IP" `
+    -Channel 202 `
+    -DetectorInput edsr `
+    -CaptureMode manual
+
+Adım 3 - Kontrol görüntüleri kaydet:
+
+Pencerede "s" tuşuyla 20-30 farklı sahne kaydet. "q" ile çık.
+
+Adım 4 - Şunları kontrol et:
+
+- source_frames gerçek kamera karesini içeriyor mu?
+- native_frames 160x120 mi?
+- sr_frames 640x480 mi?
+- detector_inputs 640x512 mi?
+- üst-alt dolgu düzgün mü?
+- kutular nesnelerle örtüşüyor mu?
+- pseudo_labels satırları oluşuyor mu?
+- metadata.jsonl içinde güven ve süre bilgisi var mı?
+
+Adım 5 - Hybrid toplama:
+
+İlk kontrol doğruysa CaptureMode hybrid ile daha uzun oturumlar çalıştır.
+
+Adım 6 - Etiketleme:
+
+detector_inputs ve pseudo_labels dosyalarını etiketleme aracına aktar. İnsan
+tarafından kontrol edilen etiketleri reviewed_labels olarak dışa aktar.
+
+Adım 7 - Bölme ve eğitim:
+
+Veriyi oturum bazında train/validation/test olarak böl. Eski veriyle birleştir,
+fine-tune et ve kilitli test üzerinde değerlendir.
+
+
+16. EN ÖNEMLİ KURALLARIN KISA ÖZETİ
+------------------------------------
+
+- Eğitim görüntüsü detector_inputs içindeki 640x512 PNG'dir.
+- pseudo_labels yalnızca model önerisidir; doğrudan eğitime verilmez.
+- Her kare insan tarafından kontrol edilir.
+- Modelin kaçırdığı nesneler elle eklenir.
+- Boş sahneler de veri setine eklenir.
+- Aynı olayın yüzlerce ardışık karesi yararlı çeşitlilik sayılmaz.
+- Train/validation/test ayrımı kare bazında değil oturum bazında yapılır.
+- Augmentation yalnızca train bölümünde uygulanır.
+- EDSR'nin faydası bicubic ve source ile aynı test verisinde ölçülür.
+- Yeni veride özellikle bike_motorcycle ve küçük/uzak nesneler
+  önceliklendirilir.
+- Kamera parolası kaynak koda yazılmaz.
+
+================================================================
+İlgili klasör:
+C:\Users\KDV\Desktop\Staj\ThermalDetection\thermal_live_detection
+================================================================

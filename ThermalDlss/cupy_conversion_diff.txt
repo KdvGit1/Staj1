@@ -1,0 +1,81 @@
+================================================================================
+THERMAL DLSS — NUMPY (CPU) VS CUPY (GPU) DÖNÜŞÜM KARŞILAŞTIRMA VE FARKLILIK BELGESİ
+================================================================================
+Tarih: 2026-07-21
+Proje: Thermal Super-Resolution (EDSR)
+
+--------------------------------------------------------------------------------
+1. GENEL MİMARİ VE DÖNÜŞÜM ÖZETİ
+--------------------------------------------------------------------------------
+
+Eski Versiyon (NumPy / CPU):
+- Diskten okunup PIL ile açılan görseller CPU üzerinde NumPy float32 dizisine dönüştürülüyordu.
+- Rastgele Kırpma (Random Crop) ve Veri Artırma (Augmentation: Flip, Rotate) işlemleri CPU bellek ve işlemci çekirdeklerinde yapılıyordu.
+- Ana thread (num_workers=0) tüm ön işleme adımlarını tek başına yürütüyor, bu da yüksek CPU (%90-100) ve RAM kullanımına, buna karşın düşük VRAM kullanımına yol açıyordu.
+
+Yeni Versiyon (CuPy / GPU):
+- Diskten okunan görseller `cupy.asarray()` ile anında NVIDIA GPU VRAM'ine aktarılır.
+- Kırpma (`_random_crop_cupy`) ve döndürme/çevirme (`_augment_cupy`) işlemleri doğrudan CuPy GPU matris fonksiyonları (`cp.flip`, `cp.rot90`) ile VRAM üzerinde gerçekleştirilir.
+- CuPy GPU matrisleri, PyTorch CUDA tensörlerine `torch.as_tensor(..., device='cuda')` ile SIFIR KOPYALAMA (CUDA Array Interface) vasıtasıyla aktarılır.
+- CuPy bulunamadığı veya kapalı olduğu durumlarda kod otomatik ve sorunsuz bir şekilde eski NumPy CPU moduna düşer (Fallback mekanizması).
+
+--------------------------------------------------------------------------------
+2. DOSYA BAZLI DETAYLI FARKLILIKLAR (DIFF)
+--------------------------------------------------------------------------------
+
+[1] dataset.py
+--------------------------------------------------------------------------------
+* Eski Yapı:
+  - `_pil_to_tensor`: PIL Image -> NumPy Float32 -> CPU Tensor (`torch.from_numpy`).
+  - `_random_crop`: PyTorch CPU tensörü üzerinde numpy/torch dilimlemesi.
+  - `_augment`: PyTorch CPU tensörü üzerinde `torch.flip`, `torch.rot90`.
+  - `ThermalSRDataset.__getitem__`: Tüm işlemleri CPU'da tamamlayıp CPU tensörü döndürürdü.
+
+* Yeni Yapı (CuPy Eklenmiş):
+  - `try...import cupy as cp`: CuPy yüklü olup olmadığı dinamik kontrol edilir.
+  - `_pil_to_cupy`: PIL Image -> NumPy -> `cp.asarray()` -> `[1, H, W]` CuPy GPU matrisi.
+  - `_random_crop_cupy`: Görseli GPU VRAM üzerinde doğrudan CuPy dilimlemesi ile kırpar.
+  - `_augment_cupy`: `cp.flip(axis=1/2)` ve `cp.rot90(1, (1, 2))` ile doğrudan GPU'da dönüştürür.
+  - `cp.ascontiguousarray`: Flip, Rot90 ve Crop sonrası oluşan negatif/kesikli adım yapılarını (strides) bitişik bellek düzenine sokarak PyTorch C++ backend çökmesini (`computeStorageNbytes` hatası) önler.
+  - `__getitem__`: `use_cupy=True` ise veriyi VRAM'de işleyip PyTorch CUDA Tensörüne dönüştürür.
+  - `create_dataloaders`: `use_cupy` parametresi eklenmiş, veri yükleme modunu ekrana yazdırır.
+
+[2] train.py
+--------------------------------------------------------------------------------
+* Eski Yapı:
+  - `--no_cupy` parametresi yoktu.
+  - DataLoader standart CPU tensörleri üretiyordu.
+
+* Yeni Yapı:
+  - Argüman ayrıştırıcıya `--no_cupy` bayrağı eklendi (İstenirse CuPy kapatılıp NumPy kullanılabilir).
+  - DataLoader oluşturulurken `use_cupy=not args.no_cupy` değeri aktarılır.
+  - GPU'da üretilen tensörlerin `lr.to(device)` ile PyTorch CUDA akışına kesintisiz uyumu sağlandı.
+
+[3] evaluate.py
+--------------------------------------------------------------------------------
+* Eski Yapı:
+  - `_pil_to_tensor` sadece `torch.from_numpy(arr)` ile CPU tensörü üretiyordu.
+
+* Yeni Yapı:
+  - `_pil_to_tensor` fonksiyonuna `device` desteği eklendi. CuPy ve CUDA aktifse girdi doğrudan CuPy üzerinden GPU VRAM'inde oluşturulup `cp.ascontiguousarray` garantisiyle PyTorch CUDA tensörüne dönüştürülür.
+  - Sonuç görselleri kaydedilirken `cp.asnumpy()` / `.cpu().numpy()` ile güvenli biçimde PIL Image formatına dönüştürülür.
+
+--------------------------------------------------------------------------------
+3. SİSTEM KAYNAKLARI KULLANIM KARŞILAŞTIRMASI
+--------------------------------------------------------------------------------
+
+Metrik                  NumPy (CPU) Versiyonu        CuPy (GPU) Versiyonu
+--------------------------------------------------------------------------------
+CPU Kullanımı           Çok Yüksek (%90 - %100)      Belirgin Derecede Düşük
+Sistem RAM              Yüksek (CPU dizileri)        Düşük (Veriler VRAM'de)
+VRAM Kullanımı          Çok Düşük (~1 GB)            Artmış / Verimli (~2-4 GB)
+Veri Kopyalama Maliyeti Yüksek (RAM -> VRAM)         Sıfır (VRAM üzerinde direct)
+Eğitim / Batch Hızı     CPU Darboğazına Takılır      Daha Hızlı ve Akıcı
+
+--------------------------------------------------------------------------------
+4. GERİYE UYUMLULUK VE GÜVENLİK
+--------------------------------------------------------------------------------
+- Projede CuPy kütüphanesi yüklenmediyse veya CUDA destekli ekran kartı yoksa, sistem hiçbir hata vermeksizin otomatik olarak orijinal NumPy/CPU çalışma moduna geçmektedir.
+- Var olan checkpoint yapısı, loss fonksiyonları (`SobelEdgeLoss`) ve EDSR model mimarisi korunmuştur.
+
+================================================================================

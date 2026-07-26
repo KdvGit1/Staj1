@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Optional acceleration for dataset conversion/verification.
+# Use only with a CUDA 12.x compatible NVIDIA driver/runtime.
+cupy-cuda12x>=13,<15
+

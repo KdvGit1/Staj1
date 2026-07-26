@@ -1,0 +1,6 @@
+outs:
+- md5: 5b33ab5aa3c838dcd48e841c20c06fb8.dir
+  size: 7411414481
+  nfiles: 30788
+  hash: md5
+  path: organized_videos

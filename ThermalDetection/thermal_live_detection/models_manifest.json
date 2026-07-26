@@ -1,0 +1,16 @@
+{
+  "edsr": {
+    "file": "weights/edsr_x4_best.pth",
+    "source": "../ThermalDlss/checkpoints/best_model.pth",
+    "bytes": 18273702,
+    "sha256": "3DFC08F0FCF26326841204E23EFCB6EC145F7C90722EB2AFF6A3DA4B07F8C80A",
+    "contract": "1-channel, 160x120 input, x4 output (640x480), 64 features, 16 residual blocks"
+  },
+  "detector": {
+    "file": "weights/yolo26n_thermal_best.pt",
+    "source": "../ThermalDetection/runs/thermal_detection/yolo26n_640x512/weights/best.pt",
+    "bytes": 5387001,
+    "sha256": "9996B672C3C5DFD2E9BDACAEEB6D9AF95B37232774494C6B04039DF41134F86A",
+    "contract": "YOLO26n, 3 classes: person/bike_motorcycle/car, fixed inference imgsz 512x640"
+  }
+}

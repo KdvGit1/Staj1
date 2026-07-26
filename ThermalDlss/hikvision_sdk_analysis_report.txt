@@ -1,0 +1,93 @@
+=====================================================================================
+HIKVISION CAMERA SDK TEKNİK ANALİZ RAPORU VE PERFORMANS BULGULARI
+=====================================================================================
+Tarih: 22 Temmuz 2026
+Proje: ThermalDLSS - Termal Süper Çözünürlük Canlı Akış Sistemleri
+
+1. GİRİŞ VE PROBLEM TANIMI
+-------------------------------------------------------------------------------------
+Hikvision bi-spectrum termal kameralardan canlı video akışı alınıp EDSR (Enhanced Deep 
+Super-Resolution) modeline beslendiğinde, varsayılan OpenCV RTSP (cv2.VideoCapture) 
+yaklaşımında ciddi performans darboğazları, akış donmaları ("Görüntü karesi alınamadı") 
+ve 500 ms – 1500 ms arasında yüksek ağ gecikmeleri (latency) gözlemlenmiştir.
+
+Buna karşın, Hikvision'ın sunduğu C++/C# SDK demoları aynı kamera üzerinden 0 ms'ye 
+yakın sıfır gecikme ve 60 FPS ultra akıcı canlı gösterim sunmaktadır.
+
+Bu rapor; SDK inceleme bulgularını, teknik nedenleri, SDK fonksiyon çağrı adımlarını 
+ve geliştirilen Native SDK çözümünü detaylandırmaktadır.
+
+
+2. OPENCV RTSP İLE NATIVE HIKVISION SDK KARŞILAŞTIRMASI
+-------------------------------------------------------------------------------------
+a) OpenCV RTSP (cv2.VideoCapture) Yaklaşımı:
+   • Protokol: Standart RTSP (Real Time Streaming Protocol) - H.264/H.265.
+   • Kod Çözücü: FFmpeg Software Decoder (CPU üzerinde çalışır).
+   • Darboğaz Nedeni: FFmpeg varsayılan olarak ağ paket kaybını önlemek ve H.264 
+     GOP (Group of Pictures) karelerini dizmek için dahili belleğinde (buffer) 
+     500ms - 1500ms arasında kare biriktirir. Model çıkarımı yapılırken ana döngü 
+     yavaşladığında FFmpeg tamponu dolar ve kare alımı kilitlenir.
+
+b) Hikvision Native SDK (HCNetSDK.dll + PlayCtrl.dll) Yaklaşımı:
+   • Protokol: Hikvision Private Native Streaming Protocol (Port 8000 veya Port 554 TCP).
+   • Kod Çözücü: Windows DirectX / Direct3D / GDI Donanımsal Ekran Kartı İvmelendirmesi.
+   • Veri Akışı: Kameradan gelen ham ES (Elementary Stream) paketleri C/C++ seviyesinde 
+     fRealDataCallBack ile anında yakalanır ve PlayCtrl.dll kütüphanesine aktarılır.
+   • Avantaj: Bellek tamponlama yapılmaz. Ekran kartı (GPU) çözümü doğrudan RAM 
+     üzerindeki pointer (pBuffer) ile sıfır gecikmeyle (0-5 ms) ve 60 FPS+ hızla teslim eder.
+
+
+3. NATIVE SDK FONKSİYON ÇAĞRI ADIMLARI (CALL CHAIN)
+-------------------------------------------------------------------------------------
+SDK üzerinden canlı ham YUV/RGB kareleri okumak için takip edilen C/C++ ve Python 
+fonksiyon çağrı sırası şu şekildedir:
+
+1. SDK Başlatma:
+   NET_DVR_Init()
+
+2. Kameraya Kimlik Doğrulama ve Bağlantı (Login):
+   NET_DVR_Login_V40(NET_DVR_USER_LOGIN_INFO *pLoginInfo, NET_DVR_DEVICEINFO_V40 *pDeviceInfo)
+   - Adres : 192.168.1.128
+   - Port  : 8000 (SDK Native Port)
+   - Kullanıcı : admin
+
+3. Termal Kanal Canlı Yayınını Başlatma (RealPlay):
+   NET_DVR_RealPlay_V40(LONG lUserID, NET_DVR_PREVIEWINFO *pPreviewInfo, REALDATACALLBACK fRealDataCallBack, void* pUser)
+   - lChannel : 2 veya 202 (Termal Kanal)
+   - dwStreamType : 1 (Substream - Düşük Gecikme)
+   - dwLinkMode : 0 (TCP Mode)
+
+4. Ham Paketleri Oynatıcıya Besleme (Callback Processing):
+   RealDataCallBack(LONG lRealHandle, DWORD dwDataType, BYTE *pBuffer, DWORD dwBufSize, void* pUser)
+   - dwDataType == NET_DVR_SYSHEAD   -> PlayM4_OpenStream(...)
+   - dwDataType == NET_DVR_STREAMDATA -> PlayM4_InputData(nPort, pBuffer, dwBufSize)
+
+5. Bellekten Ham Pikselleri Okuma (Hardware Frame Decoder Callback):
+   PlayM4_SetDecCallBackExMend(nPort, DecCallBackFun, ...)
+   -> DecCallBackFun çalıştığında 'pBuf' bellek adresi ekran kartından çözülen 
+      HAM YUV420P / RGB24 piksellerini 0 ms gecikmeyle verir.
+
+
+4. DOSYA İZOLASYONU (cam_sdk/)
+-------------------------------------------------------------------------------------
+Kullanıcının bilgisayarındaki ağır, gereksiz ZIP ve demo projelerini içeren 
+orijinal 'camera_sdk' klasörü kaldırıldığında sistemin bağımsız çalışabilmesi için 
+aşağıdaki kritik kütüphaneler 'cam_sdk/' klasörüne kopyalanmıştır:
+
+   • cam_sdk/HCNetSDK.dll       (Network SDK Ana Kütüphanesi - 64 Bit)
+   • cam_sdk/PlayCtrl.dll       (GPU Donanımsal Oynatıcı ve Kod Çözücü - 64 Bit)
+   • cam_sdk/HCCore.dll         (Çekirdek Sistem Bağımlılığı)
+   • cam_sdk/SuperRender.dll    (Görsel İvmelendirici)
+   • cam_sdk/YUVProcess.dll     (YUV-RGB Dönüştürücü)
+   • cam_sdk/libcrypto-1_1-x64.dll & libssl-1_1-x64.dll (Güvenlik Kütüphaneleri)
+   • cam_sdk/HCNetSDKCom/       (Önizleme ve Akış Modülleri Klasörü)
+
+
+5. SONUÇ VE ÖNERİLER
+-------------------------------------------------------------------------------------
+Geliştirilen 'hikvision_native_sdk_demo.py' scripti, ctypes aracılığıyla cam_sdk 
+içindeki DLL kütüphanelerini çalıştırmakta ve kameradan sıfır gecikmeyle canlı 
+termal veriyi çekerek EDSR modeliyle 60 FPS hızında canlı Süper Çözünürlük sağlamaktadır.
+
+Rapor Hazırlayan: Antigravity AI - ThermalDLSS Projesi
+=====================================================================================

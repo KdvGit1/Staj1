@@ -1,0 +1,846 @@
+TERMAL YOLO26N TESPİT PROJESİ - AYRINTILI TEKNİK DOKÜMANTASYON
+================================================================
+
+Belge amacı
+-----------
+Bu belge, projedeki tüm veri akışını, sınıf dönüşümünü, termal görüntü
+yaklaşımını, CUDA/CuPy/NumPy ilişkisini, eğitim ayarlarını, değerlendirme
+protokolünü ve her Python dosyasının görevini açıklar.
+
+Projenin hedefi
+---------------
+Model: Ultralytics YOLO26n detection
+Girdi çözünürlüğü: genişlik 640, yükseklik 512 piksel
+Model tensor sırası: [batch, kanal, yükseklik, genişlik]
+Sabit tensor örneği: [1, 3, 512, 640]
+
+Çıktı sınıfları yalnızca:
+
+  0 = person
+  1 = bike_motorcycle
+  2 = car
+
+Kaynak COCO sınıf dönüşümü:
+
+  person -> person
+  bike   -> bike_motorcycle
+  motor  -> bike_motorcycle
+  car    -> car
+
+Bus, truck, light, sign, hydrant ve diğer bütün COCO sınıfları çıktı
+sınıfı değildir. Bu nesnelerin kutuları YOLO etiketlerine yazılmaz. Sadece
+istenmeyen sınıfları içeren görüntüler boş etiketli negatif örnek olarak
+korunur. Bu yaklaşım modelin istenmeyen nesneleri hedeflerden biri sanmasını
+azaltmaya yardımcı olur.
+
+
+1. VERİ SETİ ÖZETİ
+==================
+
+COCO JSON dosyalarının referans verdiği gerçek görüntü ve hedef kutuları:
+
+Split       Görüntü   Person   Bike+Motor   Car      Hedefsiz görüntü
+-----       -------   ------   ----------   -------  ----------------
+train        10.742    50.478        8.353    73.623       518
+val           1.144     4.470          225     7.133        48
+test          3.749    12.323        3.427    30.517       256
+
+Kaynak görüntülerin gerçek yeri her split altında "data" klasörüdür.
+"analyticsData" içindeki dosyalar etiket çizilmiş büyük kopyalardır ve
+eğitim, validation veya test için kullanılmaz.
+
+COCO kayıtlarının tamamı 640x512 çözünürlüktedir. Kontrol edilen kaynaklar
+Pillow "L" modunda, yani gerçek tek kanallı gri JPEG dosyalarıdır.
+
+Train, val ve test kaynak video kimlikleri birbiriyle çakışmamaktadır.
+Mevcut split yapısı korunur. Ardışık video kareleri rastgele yeniden
+bölünmez; böylece aynı sahnenin komşu karelerinin train ve val taraflarına
+dağıtılmasından kaynaklanan veri sızıntısı önlenir.
+
+Sınıf dengesizliği:
+
+Train içindeki car / bike_motorcycle oranı yaklaşık 8,8'dir. Test
+bölümündeki bike_motorcycle örneklerinin çoğu kaynak "motor" sınıfından
+gelmektedir. Bu nedenle sadece toplam mAP değil, özellikle
+bike_motorcycle precision/recall ve sınıf AP değerleri izlenir.
+
+
+2. TERMAL VE GRAYSCALE YAKLAŞIMI
+================================
+
+YOLO26n'in resmi COCO ağırlıkları üç kanallı görüntülerle önceden
+eğitilmiştir. İlk convolution katmanını tek kanala dönüştürmek mümkün olsa
+da bu işlem ön eğitimli ağırlık aktarımını değiştirir. Bu projede mimari
+değiştirilmez.
+
+OpenCV, L modundaki JPEG'i renkli okuma seçeneğiyle yüklediğinde aynı gri
+değeri üç kanala kopyalar:
+
+  R = G = B
+
+Bu sahte renk üretmek değildir. Üç kanal birbirinin aynısıdır ve termal
+yoğunluk bilgisi korunur. train_yolo26n.py, eğitimden önce ilk görüntüyü
+OpenCV ile okuyup:
+
+  - şeklin (512, 640, 3) olduğunu,
+  - üç kanalın piksel piksel eşit olduğunu
+
+doğrular. Koşul sağlanmazsa eğitim başlamaz.
+
+Renk artırmaları:
+
+  hsv_h = 0.0       Hue değişimi yok
+  hsv_s = 0.0       Saturation değişimi yok
+  bgr   = 0.0       Kanal değiştirme yok
+  hsv_v = 0.15      Ölçülü parlaklık/yoğunluk değişimi
+
+Geometrik artırmalar:
+
+  fliplr      = 0.5     Yatay çevirme
+  flipud      = 0.0     Dikey çevirme yok
+  translate   = 0.08    Küçük öteleme
+  scale       = 0.25    Ölçülü ölçek değişimi
+  degrees     = 0.0     Rotasyon yok
+  perspective = 0.0     Perspektif bozma yok
+  mosaic      = 0.4     Sınırlı mosaic
+  mixup       = 0.0
+  cutmix      = 0.0
+
+Mosaic'in düşük tutulma nedeni veri setinde çok küçük hedeflerin
+bulunmasıdır. Yoğun mosaic nesneleri daha da küçültebilir. Son epoch'larda
+close_mosaic ile mosaic kapatılır.
+
+JPEG piksel değerleri fiziksel sıcaklık derecesi olarak kabul edilmez.
+Kaynaklar radyometrik ham sensör ölçümü değil, 8-bit görüntülerdir.
+
+
+3. 640x512 BOYUTUNUN KORUNMASI
+==============================
+
+Ultralytics train tarafında imgsz bir tamsayıdır. Eğitimde:
+
+  imgsz = 640
+  rect  = True
+
+kullanılır. Tüm görüntüler aynı 5:4 oranında, 640x512 boyutunda ve her iki
+kenar da stride 32'nin katı olduğu için batch tensörü 512x640 oluşur.
+Görüntüler 640x640 kareye esnetilmez.
+
+Inference ve export tarafında boyut doğrudan:
+
+  imgsz = (512, 640)
+  rect  = False
+
+olarak verilir. Tuple sırası (yükseklik, genişlik) şeklindedir.
+
+
+4. CUPY, NUMPY, CUDA VE PYTORCH İLİŞKİSİ
+========================================
+
+Önemli ayrım:
+
+  - YOLO model eğitimi ve inference: PyTorch
+  - GPU model hesaplamaları: PyTorch CUDA
+  - Etiket dönüşümü/doğrulama gibi yardımcı array işlemleri: CuPy veya NumPy
+
+CuPy, PyTorch'ün yerine geçmez. Ultralytics kendi model tensörlerini
+PyTorch ile yönetir. CuPy sadece COCO kutularının normalize edilmesi ve
+etiket sınırlarının vektörel kontrolü gibi bağımsız yardımcı işlemlerde
+kullanılır.
+
+Kutular görüntü başına binlerce küçük CUDA çağrısıyla işlenmez. Her split
+içindeki bütün hedef kutuları tek büyük vektörel batch halinde CuPy/NumPy
+üzerinden geçirilir. Böylece CuPy seçildiğinde host-device aktarım maliyeti
+kontrol altında tutulur.
+
+thermal_detection/array_backend.py seçim kuralı:
+
+  backend=auto:
+    1. CuPy import edilmeye çalışılır.
+    2. CUDA cihaz sayısı kontrol edilir.
+    3. GPU üzerinde küçük bir gerçek array işlemi çalıştırılır.
+    4. Başarılıysa CuPy seçilir.
+    5. CuPy yoksa, NVIDIA cihazı yoksa veya CUDA runtime uyumsuzsa NumPy
+       seçilir.
+
+  backend=cupy:
+    CuPy zorunlu tutulur. Başlatılamazsa sessiz fallback yapılmaz, açık hata
+    üretilir.
+
+  backend=numpy:
+    NumPy zorla seçilir.
+
+Ortam değişkeniyle seçim de yapılabilir:
+
+  Windows PowerShell:
+    $env:THERMAL_ARRAY_BACKEND = "auto"
+
+  Linux:
+    export THERMAL_ARRAY_BACKEND=auto
+
+Komut satırındaki --backend değeri ortam değişkeninden önceliklidir.
+
+CuPy/CUDA sürümü:
+
+CuPy paketi CUDA major sürümüyle eşleşmelidir. CUDA 12.x için proje
+requirements-cupy-cuda12.txt sağlar. CUDA 11.x veya 13.x kullanılan bir
+sistemde ilgili resmi CuPy paketi seçilmelidir. Yanlış CuPy paketi
+kurulursa auto modu NumPy'ye geri döner; ancak model eğitiminin CUDA
+durumu ayrıca PyTorch üzerinden kontrol edilir.
+
+
+5. DOSYALAR VE GÖREVLERİ
+========================
+
+prepare_dataset.py
+------------------
+Kaynak COCO verisini üç sınıflı YOLO veri setine dönüştürür.
+
+Yaptıkları:
+
+  - train, val ve test coco.json dosyalarını okur.
+  - Sadece split/data altındaki ham görüntüleri çözer.
+  - analyticsData klasörünü hiçbir zaman aramaz.
+  - person, bike, motor ve car dışındaki annotation kutularını eler.
+  - bike ile motor sınıflarını ID 1 altında birleştirir.
+  - COCO x,y,w,h kutularını normalize YOLO cx,cy,w,h biçimine dönüştürür.
+  - Kutuların görüntü sınırları içinde olduğunu denetler.
+  - Her görüntünün 640x512 ve Pillow L modunda olduğunu denetler.
+  - Hedefsiz görüntüler için boş .txt etiketi üretir.
+  - Varsayılan olarak hardlink kullanır, mümkün değilse dosyayı kopyalar.
+  - dataset.yaml ve manifest.json üretir.
+
+dataset.yaml mutlak Windows/Linux yolu içermez. "path" alanı özellikle
+yazılmaz; Ultralytics bu durumda YAML dosyasının bulunduğu klasörü veri
+kökü olarak kullanır. Böylece yolo_thermal klasörü başka bir NVIDIA
+bilgisayara taşındığında dosyanın elle düzenlenmesi gerekmez.
+
+Varsayılan çıktı:
+
+  yolo_thermal/
+    dataset.yaml
+    manifest.json
+    images/
+      train/
+      val/
+      test/
+    labels/
+      train/
+      val/
+      test/
+
+Hardlink disk alanı tasarrufu sağlar. Pipeline görüntü içeriğini hiçbir
+zaman değiştirmez. Çıktı görüntülerinin kullanıcı tarafından elle
+düzenlenmesi planlanıyorsa, hardlink'in kaynakla aynı dosya verisini
+paylaştığı unutulmamalı ve --image-mode copy kullanılmalıdır.
+
+--force güvenliği:
+
+Araç çıktı köküne .thermal_yolo_dataset işareti koyar. --force yalnızca
+bu işaret bulunan bir klasörü yenileyebilir. İşaret yoksa klasörü silmeyi
+reddeder.
+
+
+verify_dataset.py
+-----------------
+Dönüşmüş veri setini baştan sona doğrular.
+
+Kontroller:
+
+  - Her görüntünün eşleşen label dosyası var mı?
+  - Yetim label var mı?
+  - Görüntüler 640x512 ve L modunda mı?
+  - Her satır tam 5 sayı içeriyor mu?
+  - Sınıflar sadece 0, 1, 2 mi?
+  - Normalized kutular geçerli ve görüntü içinde mi?
+  - Sınıf ve boş görüntü sayıları nedir?
+
+Rapor:
+
+  reports/dataset_verification/verification_report.json
+
+Ayrıca varsayılan olarak 12 rastgele etiket görseli üretir:
+
+  reports/dataset_verification/samples/
+
+Doğrulama başarılı olduğunda veri seti grafik raporu da otomatik üretilir:
+
+  reports/graphs/dataset/dataset-report.html
+  reports/graphs/dataset/dataset-overview.svg
+  reports/graphs/dataset/class-distribution.svg
+  reports/graphs/dataset/class-shares.svg
+
+Yalnızca JSON doğrulaması istenirse --no-graphs kullanılabilir.
+
+
+train_yolo26n.py
+----------------
+YOLO26n eğitim giriş noktasıdır.
+
+Ana ayarlar:
+
+  model         = yolo26n.pt
+  epochs        = 150
+  patience      = 30
+  imgsz         = 640
+  rect          = True
+  batch         = 0.70 (Ultralytics GPU bellek otomatik oranı)
+  device        = 0
+  seed          = 42
+  deterministic = True
+  amp           = True
+  cls_pw        = 0.25
+
+cls_pw, daha seyrek bike_motorcycle sınıfının öğrenilmesine ölçülü destek
+verir. Ardışık video karelerini kaba biçimde çoğaltarak overfit oluşturmak
+yerine sınıf ağırlığı tercih edilmiştir.
+
+Tam eğitim başlamadan önce:
+
+  - dataset.yaml içindeki sınıflar doğrulanır.
+  - PyTorch CUDA kontrol edilir.
+  - İlk görüntünün 3 eş gri kanal olarak geldiği doğrulanır.
+
+CUDA görünmüyorsa device=0 ile eğitim reddedilir. Böylece yanlış PyTorch
+kurulumu nedeniyle günler sürebilecek kazara CPU eğitimi engellenir.
+Gerçekten CPU smoke testi istenirse --device cpu açıkça verilmelidir.
+
+Smoke test:
+
+  --smoke-test
+
+Bu mod 2 epoch ve verinin en fazla yüzde 5'iyle bütün pipeline'ı sınar.
+Smoke test başarılı olmadan tam eğitime geçilmemelidir.
+
+Kesilen eğitimi sürdürme:
+
+  --resume path/to/last.pt
+
+Resume modunda checkpoint içindeki optimizer, epoch ve eğitim ayarları
+Ultralytics tarafından geri yüklenir.
+
+Eğitim veya resume tamamlandığında results.csv otomatik okunur ve run
+klasörünün altında graph-report oluşturulur:
+
+  graph-report/training-report.html
+  graph-report/training-losses.svg
+  graph-report/validation-losses.svg
+  graph-report/validation-metrics.svg
+  graph-report/learning-rate.svg
+  graph-report/training-time.svg
+
+Grafik raporunda en iyi mAP50-95 epoch'u işaretlenir. HTML dosyasında
+results.csv içindeki bütün sayısal sütunların son, minimum ve maksimum
+değerleri ayrıca tablo halinde bulunur.
+
+
+evaluate_model.py
+-----------------
+Validation veya test metriklerini üretir.
+
+Raporlananlar:
+
+  - Genel precision, recall, mAP50 ve mAP50-95
+  - Person sınıf metrikleri
+  - Bike_motorcycle sınıf metrikleri
+  - Car sınıf metrikleri
+  - Confusion matrix ve Ultralytics grafikleri
+  - Görüntü başına preprocess, inference ve postprocess süreleri
+
+Her koşumun klasörüne thermal_metrics_summary.json yazılır.
+
+YOLO26 iki detection başlığı taşır:
+
+  end2end=True:
+    Varsayılan one-to-one, NMS gerektirmeyen çıktı.
+
+  end2end=False:
+    One-to-many, geleneksel NMS kullanan çıktı.
+
+--compare-heads ile ikisi validation üzerinde karşılaştırılır. Model seçimi
+ve confidence kararı validation üzerinde yapılır. Test kümesi bu kararlar
+kesinleştikten sonra yalnızca nihai rapor için kullanılmalıdır.
+
+Her değerlendirmeden sonra otomatik SVG/HTML raporu oluşturulur:
+
+  runs/evaluation/<ad>_<split>_graph-report/evaluation-report.html
+
+İçerik:
+
+  - Her sınıf için precision, recall, mAP50 ve mAP50-95 bar grafiği
+  - Preprocess, inference, loss ve postprocess süre grafiği
+  - --compare-heads kullanıldığında end-to-end / traditional-NMS grafiği
+  - Bütün genel değerlerin eksiksiz karşılaştırma tablosu
+
+
+infer.py
+--------
+Tek görüntü, klasör, video, kamera veya stream üzerinde tahmin yapar.
+
+Zorunlu sabit giriş:
+
+  imgsz=(512, 640)
+  rect=False
+  classes=[0, 1, 2]
+
+Checkpoint sınıf isimleri tam olarak beklenen üç sınıf değilse inference
+başlamaz. Bu kontrol yanlışlıkla COCO'nun 80 sınıflı yolo26n.pt ağırlığını
+doğrudan çalıştırmayı engeller.
+
+Inference tamamlandığında tahmin klasörünün altında graph-report oluşturulur.
+Bu rapor person, bike_motorcycle ve car toplam tespit sayılarını, yüzdelerini
+ve işlenen toplam görüntü/kare sayısını gösterir:
+
+  graph-report/prediction-report.html
+  graph-report/prediction-class-counts.svg
+
+
+export_model.py
+---------------
+Modeli ONNX, TensorRT engine, OpenVINO veya TorchScript biçimine aktarır.
+
+Varsayılan:
+
+  format  = onnx
+  batch   = 1
+  dynamic = False
+  input   = [1, 3, 512, 640]
+
+--dynamic verilmezse sabit giriş kontratı korunur. TensorRT export
+NVIDIA/TensorRT kurulu hedef sistemde yapılmalıdır.
+
+
+check_environment.py
+--------------------
+Aşağıdakileri raporlar:
+
+  - Python sürümü
+  - Ultralytics sürümü
+  - PyTorch sürümü
+  - PyTorch'ün derlendiği CUDA sürümü
+  - torch.cuda.is_available()
+  - GPU adı ve VRAM
+  - Yardımcı CuPy/NumPy backend seçimi
+
+--require-cuda verilirse CUDA hazır değilken hata koduyla çıkar.
+
+
+thermal_detection/array_backend.py
+----------------------------------
+CuPy/NumPy otomatik seçim katmanıdır.
+
+thermal_detection/data_utils.py
+-------------------------------
+Sınıf haritası, bbox normalizasyonu, sınır kontrolü, güvenli çıktı
+oluşturma, hardlink/copy ve dataset.yaml üretimini içerir.
+
+thermal_detection/model_utils.py
+--------------------------------
+CUDA cihaz kontrolü, üç sınıflı checkpoint kontrolü, grayscale kanal
+kontratı ve JSON metrik yardımcılarını içerir.
+
+thermal_detection/reporting.py
+------------------------------
+Harici grafik kütüphanesi gerektirmeyen SVG ve HTML rapor üreticisidir.
+Veri seti, eğitim, değerlendirme ve inference raporlarını oluşturur.
+SVG olduğu için grafikler kalite kaybı olmadan büyütülebilir.
+
+generate_graph_reports.py
+-------------------------
+Mevcut manifest, results.csv veya değerlendirme JSON dosyalarından grafik
+raporlarını eğitim çalıştırmadan yeniden üretir.
+
+tests/test_data_utils.py
+------------------------
+COCO -> YOLO kutu matematiği, sınır kontrolü ve backend seçimi için küçük
+birim testleridir.
+
+
+6. NVIDIA SİSTEMDE KURULUM
+==========================
+
+Önerilen Python:
+
+  Python 3.10, 3.11 veya 3.12
+
+Adım 1 - NVIDIA sürücüsünü doğrula:
+
+  nvidia-smi
+
+Adım 2 - Sanal ortam oluştur:
+
+Windows PowerShell:
+
+  py -3.11 -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  python -m pip install --upgrade pip
+
+Linux:
+
+  python3.11 -m venv .venv
+  source .venv/bin/activate
+  python -m pip install --upgrade pip
+
+Adım 3 - CUDA destekli PyTorch kur:
+
+PyTorch kurulum komutu GPU sürücüsü ve hedef CUDA wheel sürümüne göre
+değişir. Güncel komut https://pytorch.org/get-started/locally/ sayfasından
+alınmalıdır. Önce PyTorch kurulmalıdır; requirements.txt mevcut PyTorch
+kurulumunu kullanır.
+
+Kurulumun ardından:
+
+  python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+
+Son değer True olmalıdır.
+
+Adım 4 - Proje bağımlılıklarını kur:
+
+CuPy olmadan, güvenli NumPy fallback:
+
+  python -m pip install -r requirements.txt
+
+CUDA 12.x ve CuPy ile:
+
+  python -m pip install -r requirements-cupy-cuda12.txt
+
+Adım 5 - Ortamı denetle:
+
+  python check_environment.py --require-cuda --backend auto
+
+
+7. ÖNERİLEN ÇALIŞMA SIRASI
+==========================
+
+7.1 Veri setini yazmadan tam audit:
+
+  python prepare_dataset.py --dry-run --backend auto
+
+Bu komut bütün COCO kayıtlarını, görüntü başlıklarını ve kutuları kontrol
+eder; dosya yazmaz.
+
+7.2 YOLO veri setini oluştur:
+
+  python prepare_dataset.py --backend auto --image-mode auto
+
+Diskte bağımsız kopya istenirse:
+
+  python prepare_dataset.py --backend auto --image-mode copy
+
+7.3 Dönüşümü doğrula ve örnek çiz:
+
+  python verify_dataset.py --backend auto --visualize 12
+
+verification_report.json içindeki sayılar bu belgenin veri özetiyle
+eşleşmelidir.
+
+7.4 Birim testleri çalıştır:
+
+  python -m unittest discover -s tests -v
+
+7.5 CUDA smoke test:
+
+  python train_yolo26n.py --smoke-test --device 0
+
+Kontrol edilecekler:
+
+  - Input tensor 512x640 mı?
+  - CUDA belleği normal mi?
+  - Loss değerleri sonlu mu?
+  - Validation tamamlanıyor mu?
+  - weights/last.pt ve weights/best.pt oluşuyor mu?
+
+7.6 Tam eğitim:
+
+  python train_yolo26n.py --device 0
+
+Örnek sabit batch:
+
+  python train_yolo26n.py --device 0 --batch 16
+
+Daha az worker gereken Windows sistemi:
+
+  python train_yolo26n.py --device 0 --workers 4
+
+7.7 Kesilen koşumu sürdür:
+
+  python train_yolo26n.py --resume runs/thermal_detection/yolo26n_640x512/weights/last.pt --device 0
+
+7.8 Validation üzerinde iki YOLO26 başlığını karşılaştır:
+
+  python evaluate_model.py ^
+    --model runs/thermal_detection/yolo26n_640x512/weights/best.pt ^
+    --split val ^
+    --compare-heads ^
+    --device 0
+
+PowerShell tek satır:
+
+  python evaluate_model.py --model runs/thermal_detection/yolo26n_640x512/weights/best.pt --split val --compare-heads --device 0
+
+7.9 Model ve eşikler kesinleşince final test:
+
+  python evaluate_model.py --model runs/thermal_detection/yolo26n_640x512/weights/best.pt --split test --device 0
+
+Test sonuçlarına göre yeniden model seçmek veya hyperparameter ayarlamak
+test sızıntısı oluşturur. Değişiklik gerekirse validation ile karar verilip
+test nihai aşamada yeniden raporlanmalıdır.
+
+7.10 Görüntü inference:
+
+  python infer.py --model path/to/best.pt --source path/to/image.jpg --device 0
+
+7.11 Video inference:
+
+  python infer.py --model path/to/best.pt --source path/to/video.mp4 --device 0 --save-txt --save-conf
+
+7.12 Kamera:
+
+  python infer.py --model path/to/best.pt --source 0 --device 0 --show
+
+7.13 Sabit ONNX export:
+
+  python export_model.py --model path/to/best.pt --format onnx --device 0
+
+7.14 TensorRT:
+
+  python export_model.py --model path/to/best.pt --format engine --device 0 --half
+
+
+8. MODEL SEÇİMİ VE BAŞARI KRİTERLERİ
+====================================
+
+Sadece genel mAP yeterli değildir. Aşağıdakiler birlikte değerlendirilir:
+
+  1. mAP50-95 genel değer
+  2. Her sınıfın ayrı AP50-95 değeri
+  3. Bike_motorcycle recall
+  4. Person recall
+  5. Yanlış car tespitleri
+  6. Bus/truck gibi yok sayılan sınıfların car olarak algılanması
+  7. Küçük ve uzaktaki nesnelerin kaçırılma örnekleri
+  8. Hedef NVIDIA donanımındaki inference süresi
+
+Ultralytics best.pt seçimini validation fitness değerine göre yapar.
+Operasyonel confidence eşiği ayrıca validation sonuçları ve gerçek kullanım
+senaryosunun false-positive/false-negative maliyetine göre belirlenmelidir.
+
+
+9. SORUN GİDERME
+================
+
+Sorun: nvidia-smi çalışıyor ama torch.cuda.is_available() False
+Çözüm:
+  Büyük olasılıkla CPU-only PyTorch kurulmuştur. Mevcut torch paketini
+  kaldırıp PyTorch resmi kurulum sayfasındaki uygun CUDA wheel'i kurun.
+
+Sorun: CuPy import hatası
+Çözüm:
+  CUDA major sürümüyle eşleşen CuPy paketini kurun. Hızlandırma zorunlu
+  değilse --backend auto kullanın; NumPy fallback devreye girer.
+
+Sorun: CUDA out of memory
+Çözüm:
+  --batch 8 veya --batch 4 kullanın. Varsayılan 0.70 otomatik bellek
+  hedefidir; yine de bazı sürücü/augment kombinasyonlarında sabit daha küçük
+  batch gerekebilir.
+
+Sorun: Windows DataLoader worker hatası
+Çözüm:
+  --workers 4, gerekirse --workers 0 kullanın.
+
+Sorun: Çıktı klasörü dolu
+Çözüm:
+  Önce klasörün gerçekten bu araç tarafından üretildiğini doğrulayın.
+  Yeniden üretmek için --force kullanılabilir. Güvenlik işareti yoksa araç
+  klasörü silmez.
+
+Sorun: Model 80 sınıf gösteriyor
+Çözüm:
+  yolo26n.pt doğrudan inference için kullanılmıştır. Eğitimden üretilen
+  üç sınıflı best.pt kullanılmalıdır. infer.py bu hatayı otomatik yakalar.
+
+Sorun: 640x640 tensor görülüyor
+Çözüm:
+  Projedeki train_yolo26n.py kullanılmalı; imgsz=640 ve rect=True
+  değiştirilmemelidir. Dataset görüntülerinin tamamı 640x512 olmalıdır.
+
+Sorun: Bike/motorcycle recall düşük
+Çözüm sırası:
+  1. Etiket örneklerini verification görsellerinden kontrol edin.
+  2. Validation kaynak video bazında hataları inceleyin.
+  3. Confidence eşiğini validation üzerinde değerlendirin.
+  4. cls_pw değerini kontrollü deneyle değiştirin.
+  5. Gerekirse daha fazla motor/bike verisi ekleyin.
+  Test kümesine bakarak hyperparameter seçmeyin.
+
+
+10. YENİDEN ÜRETİLEBİLİRLİK VE LİSANS
+=====================================
+
+requirements.txt, doğrulanan Ultralytics 8.4.102 sürümünü sabitler.
+Eğitim seed=42 ve deterministic=True kullanır. Ultralytics her koşumda
+args.yaml, metrik CSV dosyaları, grafikler ve checkpoint üretir.
+
+Ultralytics paketinin açık kaynak dağıtımı AGPL-3.0 lisanslıdır; kapalı
+kaynak veya ticari dağıtım yapılacaksa güncel Ultralytics lisans koşulları
+kontrol edilmeli ve gerekirse Enterprise lisans değerlendirilmelidir:
+
+  https://www.ultralytics.com/license
+
+
+11. KISA KONTROL LİSTESİ
+========================
+
+[ ] Python 3.10+ kurulu
+[ ] NVIDIA sürücüsü ve nvidia-smi çalışıyor
+[ ] CUDA destekli PyTorch kurulu
+[ ] check_environment.py --require-cuda başarılı
+[ ] prepare_dataset.py --dry-run başarılı
+[ ] prepare_dataset.py başarılı
+[ ] verify_dataset.py başarılı
+[ ] Birim testleri başarılı
+[ ] Smoke training başarılı
+[ ] Tam eğitim tamamlandı
+[ ] Validation iki head ile karşılaştırıldı
+[ ] Confidence validation üzerinde seçildi
+[ ] Test yalnızca nihai ölçüm için çalıştırıldı
+[ ] Hedef donanımda hız ölçüldü
+[ ] Veri/eğitim/değerlendirme grafik raporları incelendi
+[ ] best.pt ve export dosyaları arşivlendi
+
+
+12. GRAFİK RAPORLAMA SİSTEMİ
+============================
+
+Amaç
+----
+Grafik raporları yalnızca görsel özet değildir. Her önemli değer:
+
+  - bar veya çizgi üzerinde doğrudan sayı olarak,
+  - eksen ve legend açıklamasıyla,
+  - HTML raporunda eksiksiz tablo olarak,
+  - kaynak JSON/CSV dosyasında makine-okunur biçimde
+
+saklanır. Böylece grafik kolay okunur kalırken hiçbir metrik kaybolmaz.
+
+Grafikler saf SVG olarak üretilir. Matplotlib, Plotly veya tarayıcı CDN
+bağımlılığı yoktur. HTML raporlar çevrimdışı açılabilir ve SVG dosyalarına
+göreli bağlantı kullanır; bütün rapor klasörü başka sisteme taşınabilir.
+
+
+12.1 Mevcut veri seti raporu
+----------------------------
+
+Bu proje için hazır rapor:
+
+  reports/graphs/dataset/dataset-report.html
+
+İçindeki grafikler:
+
+dataset-overview.svg:
+  - Train, val ve test görüntü sayısı
+  - Hedef içeren ve hedefsiz negatif görüntü sayısı
+  - Her split hedef kutusu
+  - Görüntü başına ortalama kutu
+
+class-distribution.svg:
+  - Person, bike_motorcycle ve car gerçek kutu sayıları
+  - Nadir bike_motorcycle değerlerini görünür tutan logaritmik eksen
+  - Her barın üzerinde log değer değil gerçek kutu sayısı
+
+class-shares.svg:
+  - Her split içinde üç sınıfın yüzde payı
+  - Her yüzdeyle birlikte gerçek kutu sayısı
+
+Logaritmik grafik yorumlanırken bar yüksekliği doğrusal sayısal fark olarak
+okunmamalıdır. Kesin değer her barın üzerinde yazılıdır.
+
+Raporu yeniden üretmek:
+
+  python generate_graph_reports.py
+
+
+12.2 Eğitim grafikleri
+----------------------
+
+Tam eğitim bittiğinde otomatik oluşur. Daha önce tamamlanmış bir Ultralytics
+run klasörü için manuel komut:
+
+  python generate_graph_reports.py --run-dir runs/thermal_detection/yolo26n_640x512
+
+training-losses.svg:
+  Train loss sütunlarının tamamı.
+
+validation-losses.svg:
+  Validation loss sütunlarının tamamı. Train loss düşerken validation loss
+  kalıcı yükseliyorsa overfitting olasılığı incelenmelidir.
+
+validation-metrics.svg:
+  Precision, recall, mAP50 ve mAP50-95. Dikey eksen sabit 0-1'dir.
+
+learning-rate.svg:
+  Bütün optimizer parametre gruplarının learning-rate eğrileri.
+
+training-time.svg:
+  results.csv içindeki kümülatif çalışma süresi.
+
+Kırmızı kesikli dikey çizgi, en yüksek validation mAP50-95 değerinin elde
+edildiği epoch'u gösterir. Son noktaların değerleri doğrudan yazılır.
+
+
+12.3 Değerlendirme grafikleri
+-----------------------------
+
+evaluate_model.py raporu otomatik üretir. Önceden oluşturulmuş summary
+dosyaları için:
+
+  python generate_graph_reports.py ^
+    --evaluation-summary path/to/end2end/thermal_metrics_summary.json ^
+    --evaluation-summary path/to/traditional_nms/thermal_metrics_summary.json
+
+PowerShell tek satır biçimi:
+
+  python generate_graph_reports.py --evaluation-summary path/to/end2end/thermal_metrics_summary.json --evaluation-summary path/to/traditional_nms/thermal_metrics_summary.json
+
+class-metrics-<head>.svg:
+  Her sınıfın precision, recall, mAP50 ve mAP50-95 değeri.
+
+speed-<head>.svg:
+  Görüntü başına preprocess, inference, loss ve postprocess milisaniyeleri.
+
+head-comparison.svg:
+  İki summary verilirse end-to-end ve traditional-NMS genel metriklerini
+  aynı 0-1 ekseninde karşılaştırır.
+
+
+12.4 Inference grafikleri
+-------------------------
+
+infer.py bütün stream'i işledikten sonra:
+
+  - toplam işlenen giriş/kare sayısını,
+  - üç sınıfın toplam tespit sayısını,
+  - her sınıfın bütün tespitler içindeki payını
+
+raporlar. Bu grafik model kalitesini tek başına ölçmez; inference yapılan
+kaynağın içerik dağılımını gösterir. Precision/recall yorumu için etiketli
+validation veya test kullanılmalıdır.
+
+
+12.5 Grafik doğrulaması
+-----------------------
+
+tests/test_reporting.py sentetik veriyle şunları denetler:
+
+  - Veri seti raporunda bütün split ve sınıfların bulunması
+  - Eğitim results.csv dosyasının loss, metrik, LR ve süre grafiklerine dönüşmesi
+  - Değerlendirme head karşılaştırmasının oluşması
+  - Inference sınıf grafiğinin oluşması
+  - SVG dosyalarının geçerli XML olarak açılması
+
+Test:
+
+  python -m unittest discover -s tests -v
+
+Belge sonu.

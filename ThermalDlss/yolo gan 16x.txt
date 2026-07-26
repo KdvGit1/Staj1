@@ -1,0 +1,60 @@
+================================================================================
+          PROJE PLANI: UÇTAN UCA TERMAL GÖRÜNTÜ SÜPER ÇÖZÜNÜRLÜK (16X) 
+                       VE NESNE TESPİTİ BAKIŞ AÇISI
+================================================================================
+
+PROJE ÖZETİ:
+Bu proje; 40x30 piksel gibi aşırı düşük çözünürlüklü kısıtlı termal kaynak verilerini,
+Real-ESRGAN (GAN) tabanlı 2 kademeli (16x) Süper Çözünürlük mimarisi ile 640x512 
+boyutuna yükseltmeyi ve ardından YOLO Nesne Tespiti mimarisine besleyerek tespit 
+başarısını artırmayı hedefler.
+
+--------------------------------------------------------------------------------
+1. FAZ: VERİ KÜMESİ VE EĞİTİM ÇİFTLERİNİN HAZIRLANMASI
+--------------------------------------------------------------------------------
+  1.1. Hedef/Gerçek (Ground Truth) Veri Seti Toplama:
+       - Yüksek kalitede 640x512 çözünürlüğe sahip termal görüntüler toplanır.
+  1.2. Sentetik Düşük Çözünürlüklü Veri Üretimi:
+       - 640x512 boyutundaki yüksek kaliteli termal veriler "Bicubic Downscale" 
+         yöntemiyle 40x30 boyutuna düşürülür.
+  1.3. Veri Eşleme ve Ön İşleme:
+       - Model eğitimi için (Input: 40x30, Target: 640x512) eşli veri seti (paired dataset)
+         boru hattı (pipeline) kurgulanır.
+
+--------------------------------------------------------------------------------
+2. FAZ: DERİN ÖĞRENME MODELİ MİMARİSİ (JENERATÖR / GAN)
+--------------------------------------------------------------------------------
+  2.1. Giriş ve Özellik Çıkarımı (Head & Body):
+       - 40x30 boyutundaki 1 kanallı (termal) girdi Conv2d ile 64 kanala genişletilir.
+       - Residual-in-Residual Dense Block (RRDB) katmanları ile termal doku ve komşuluk 
+         ilişkileri derin kanallara kodlanır.
+  2.2. Kademeli Büyütme Aşaması (Upscale - 16x):
+       - 1. Aşamada PixelShuffle(4x) kullanılarak resim 160x120 boyutuna getirilir.
+       - 2. Aşamada PixelShuffle(4x) kullanılarak resim 640x480 boyutuna çıkarılır.
+  2.3. Boyut İnce Ayarı (Tail & Padding):
+       - 640x480 çözünürlüğündeki resim, kenar dolguları (Padding) ile 640x512 
+         standardına tamamlanır.
+
+--------------------------------------------------------------------------------
+3. FAZ: DİSKRİMİNATÖR VE HİBRİT KAYIP (LOSS) HESAPLAMA
+--------------------------------------------------------------------------------
+  3.1. Akıllı Keskinleştirme (Diskriminatör Ağı):
+       - Üretilen 640x512 görsel ile gerçek 640x512 görsel Diskriminatör tarafından 
+         kıyaslanır. Bulanık ve dengesiz yapılar elenir.
+  3.2. Ortak Eğitim ve Kayıp Fonksiyonları (Joint Loss Optimization):
+       - Adversarial Loss (GAN): Gerçekçi yapay kenarlar ve kontrast için.
+       - Perceptual Loss (VGG/Feature Loss): Matematiksel piksel farkından ziyade 
+         nesne form/şekil hatasını minimize etmek için.
+       - L1 Loss: Temel renk/sıcaklık değerleri doğruluğunu korumak için.
+
+--------------------------------------------------------------------------------
+4. FAZ: NESNE TESPİTİ (YOLO) ENTEGRASYONU VE DEĞERLENDİRME
+--------------------------------------------------------------------------------
+  4.1. Dedektör Eğitimi (YOLO Fine-Tuning):
+       - GAN tarafından üretilen keskinleştirilmiş 640x512 görseller YOLO modeline 
+         verilerek nesne tespiti eğitimi tamamlanır.
+  4.2. Başarı Metriklerinin Ölçümü:
+       - Süper Çözünürlük Metrikleri: PSNR ve SSIM skorları (Gerçekliğe yakınlık).
+       - Nesne Tespiti Metrikleri: mAP@0.5 ve Recall skorları (Doğru tespit oranı).
+
+================================================================================

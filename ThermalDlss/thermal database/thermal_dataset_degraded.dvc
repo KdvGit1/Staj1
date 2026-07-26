@@ -1,0 +1,6 @@
+outs:
+- md5: 403634aa4c8a0c70c7be3c754aab9029.dir
+  size: 551597278
+  nfiles: 31270
+  hash: md5
+  path: thermal_dataset_degraded

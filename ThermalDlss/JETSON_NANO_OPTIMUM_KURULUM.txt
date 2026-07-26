@@ -1,0 +1,752 @@
+JETSON NANO - HIKVISION TERMAL KAMERA + EDSR + YOLO26N
+DUZELTILMIS OPTIMUM DAGITIM PLANI
+=====================================================
+
+1. DUZELTME VE SISTEMIN KESIN TANIMI
+------------------------------------
+
+Onceki anlatimdaki "EDSR'yi sadece alarm aninda calistirma" onerisi bu sistemin
+istenen mimarisine uygun degildir. Bu projede EDSR, nesne tespitinden ONCE ve
+her islenen karede calisacaktir.
+
+Kesin islem sirasi:
+
+    Hikvision termal kamera
+              |
+              v
+    Ethernet / RTSP / H.264
+              |
+              v
+    Donanimsal video decode (NVDEC)
+              |
+              v
+    Kamera goruntusu: 160x120
+              |
+              v
+    Dikey reflect padding: 160x120 -> 160x128
+              |
+              v
+    EDSR x4 FP16 TensorRT: 160x128 -> 640x512
+              |
+              v
+    Grayscale -> YOLO icin 3 kanal
+              |
+              v
+    YOLO26n FP16 TensorRT: 640x512
+              |
+              v
+    NMS, tespitler, alarm ve goruntuleme
+
+Veri seti ve kamera boyutlari birbirinden farklidir:
+
+    Egitim LR:       160x128
+    Egitim HR:       640x512
+    Kamera native:   160x120
+
+EDSR tam konvolusyonel oldugu icin 160x120 girisi de calistirabilir ve 640x480
+cikti verir. Ancak YOLO tarafinda egitim geometrisini 640x512 olarak korumak
+icin canli 160x120 goruntuyu EDSR'den once 160x128'e tamamlamak daha temiz ve
+statik TensorRT engine icin daha uygundur.
+
+Onerilen padding:
+
+    Ust:  4 piksel
+    Alt:  4 piksel
+    Mod:  reflect veya replicate
+
+Sifir padding onerilmez; termal goruntunun ust ve alt kenarinda yapay siyah
+bant ve EDSR kenar artefakti olusturabilir.
+
+YOLO tespitlerinden sonra koordinatlar orijinal 160x120 kamera geometrisine
+geri cevrilecekse, EDSR cikisindaki ust ve alt 16 piksellik padding hesaba
+katilmalidir:
+
+    x_camera = x_edsr / 4
+    y_camera = (y_edsr - 16) / 4
+
+Koordinatlar gecerli kamera alaniyla sinirlanmalidir:
+
+    x: 0..159
+    y: 0..119
+
+
+2. GERCEKCI FPS BEKLENTISI
+--------------------------
+
+Mevcut EDSR:
+
+    num_features = 64
+    num_residual_blocks = 16
+    Giris = 160x128
+    Cikis = 640x512
+
+160x120 icin hesaplanan EDSR maliyeti yaklasik:
+
+    37.7 GMAC/frame
+    75.4 GFLOP/frame
+
+160x128 giris, 160x120'den yaklasik yuzde 6.7 daha fazla piksel icerir.
+Dolayisiyla canli statik 160x128 engine'in EDSR maliyeti yaklasik:
+
+    40.2 GMAC/frame
+    80.4 GFLOP/frame
+
+YOLO26n 640 kare giriste yaklasik 5.4 GFLOP'tur. 640x512 dikdortgen giris
+yaklasik 4.3 GFLOP civarindadir. Iki modelin toplam teorik is yuku yaklasik:
+
+    EDSR:       80.4 GFLOP/frame
+    YOLO26n:     4.3 GFLOP/frame
+    --------------------------------
+    Toplam:     84.7 GFLOP/frame
+
+Jetson Nano 4 GB, FP16 TensorRT, batch=1, 10 W modu, jetson_clocks ve aktif
+sogutma icin beklenen uctan uca sonuc:
+
+    Python + OpenCV + PyTorch:             1.0 - 2.0 FPS
+    Python + TensorRT, kontrollu kopya:    1.5 - 2.5 FPS
+    C++ + TensorRT + NVDEC:                2.0 - 4.0 FPS
+
+Bu degerler tahmindir. Kesin FPS, hedef cihazda uretilen engine ve gercek RTSP
+akisi ile olculmelidir. Darbogaz YOLO26n degil, EDSR'dir. Python'i C++'a
+cevirmek gereksiz kopyalari ve runtime overhead'ini azaltir; fakat EDSR'nin
+yaklasik 80 GFLOP/frame hesap yukunu ortadan kaldirmaz.
+
+Kamera 25 FPS gonderse bile tam EDSR + YOLO tespit sonucu 2-4 FPS civarinda
+guncellenebilir. Dusuk gecikme icin kuyruk biriktirmek yerine eski kareler
+atilmalidir. Boylece sistem yavaslasa bile her zaman en yeni kareyi isler.
+
+
+3. DAHA YUKSEK FPS ICIN EDSR-LITE SECENEGI
+------------------------------------------
+
+EDSR'nin YOLO'dan once calisma sarti korunarak daha yuksek FPS isteniyorsa,
+modelin kucultulup yeniden egitilmesi gerekir:
+
+    EDSR(
+        scale_factor=4,
+        num_channels=1,
+        num_features=32,
+        num_residual_blocks=8,
+    )
+
+Yaklasik hesap:
+
+    Mevcut EDSR 64x16:  yaklasik 80.4 GFLOP/frame (160x128)
+    EDSR-Lite 32x8:     yaklasik 14.2 GFLOP/frame (160x128)
+    Teorik azalma:      yaklasik 5.7 kat
+
+EDSR-Lite + YOLO26n FP16 icin optimize C++ pipeline tahmini:
+
+    5 - 10 FPS
+
+Bu secenek mevcut best_model.pth dosyasini kullanamaz. Model yeniden
+egitilmeli; PSNR, SSIM ve YOLO mAP degerleri mevcut modelle
+karsilastirilmalidir.
+
+
+4. EN YUKSEK FPS VEREN URETIM YAZILIMI
+--------------------------------------
+
+Onerilen uretim uygulamasi:
+
+    Dil:              C++17
+    Video:            GStreamer
+    Decode:           nvv4l2decoder / NVDEC
+    Inference:        TensorRT 8 C++ API
+    GPU islemleri:    CUDA
+    Goruntuleme:      Istege bagli; OpenCV sadece son cikista
+    Batch:            1
+    Engine boyutlari: Statik
+
+Python sadece su islemler icin kullanilabilir:
+
+    - Egitim
+    - Checkpoint yukleme
+    - ONNX export
+    - Offline dogrulama
+
+Jetson'daki surekli calisan uygulamada su islemler olmamalidir:
+
+    - PyTorch runtime
+    - Her karede NumPy dizisi olusturma
+    - Her karede cudaMalloc/cudaFree
+    - EDSR ile YOLO arasinda GPU -> CPU -> GPU kopyasi
+    - Her karede frame.copy()
+    - Her karede cv2.cvtColor ve cv2.resize'i CPU'da calistirma
+    - Surekli cv2.imshow kullanma
+    - Iki ayri Python prosesinde iki model calistirma
+
+EDSR cikisi GPU'da kalmali ve dogrudan YOLO girisine donusturulmelidir:
+
+    EDSR output FP16 [1,1,512,640]
+              |
+              v
+    CUDA kernel:
+        clamp 0..1
+        grayscale kanali 3 kanala kopyala
+        gerekiyorsa YOLO normalization uygula
+              |
+              v
+    YOLO input FP16 [1,3,512,640]
+
+Arada uint8 goruntuye donusturme yapilmamasi tercih edilir. EDSR cikisini
+once uint8'e cevirip sonra tekrar FP16 YOLO tensorune donusturmek hem kalite
+hem de hiz kaybidir.
+
+
+5. THREAD VE BUFFER MIMARISI
+----------------------------
+
+Tek proses, uc is parcacigi onerilir:
+
+    Thread 1 - RTSP / Decode
+        - RTSP paketlerini alir.
+        - NVDEC ile H.264/H.265 decode eder.
+        - Yalnizca en son kareyi tutar.
+        - Kuyruk doluysa eski kareyi atar.
+
+    Thread 2 - GPU Inference
+        - En son 160x120 kareyi alir.
+        - CUDA/VIC ile grayscale donusumu yapar.
+        - Reflect padding ile 160x128 yapar.
+        - EDSR FP16 TensorRT calistirir.
+        - EDSR ciktisini GPU'da YOLO tensorune cevirir.
+        - YOLO26n FP16 TensorRT calistirir.
+
+    Thread 3 - Output
+        - NMS ve koordinat donusumunu yapar.
+        - Alarm/takip mesajlarini yayimlar.
+        - Gerekirse goruntu kaydeder veya ekrana verir.
+
+Kuyruk yapisi:
+
+    Decode -> inference kuyrugu: 1 kare
+    Inference -> output kuyrugu: 1 veya 2 kare
+    Politika: eski kareyi at, en yeni kareyi isle
+
+Bu yapinin amaci inference FPS'ini yapay olarak yukseltmek degil, RTSP
+gecikmesinin zamanla birikmesini engellemektir.
+
+Tum GPU buffer'lari uygulama baslarken bir kez ayrilmalidir:
+
+    decoded NV12/RGBA buffer
+    gray 160x120 buffer
+    padded EDSR input [1,1,128,160] FP16
+    EDSR output [1,1,512,640] FP16
+    YOLO input [1,3,512,640] FP16
+    YOLO output buffer
+
+Mumkunse pinned host memory ve asenkron cudaMemcpyAsync kullanilmalidir.
+
+
+6. JETSON NANO SISTEM KURULUMU
+------------------------------
+
+Onerilen temel sistem:
+
+    JetPack:       4.6.6 (JetPack 4 serisinin son surumu)
+    CUDA:          JetPack ile gelen CUDA 10.2
+    TensorRT:      JetPack ile gelen TensorRT 8.x
+    GStreamer:     JetPack ile gelen surum
+    DeepStream:    Zorunlu degil
+
+DeepStream 6.0.1, Jetson Nano icin yeni ozellik destegi sunan son DeepStream
+surumudur. Ancak EDSR'nin goruntu tensoru ciktisini YOLO'ya yeni video yuzeyi
+olarak aktarmak ozel plugin gerektirir. Bu nedenle tek kameralik bu proje icin
+dogrudan C++ GStreamer + TensorRT pipeline daha sade ve daha kontrolludur.
+
+Donanim:
+
+    - Kaliteli 5V/4A guc adaptoru
+    - Mumkunse barrel-jack besleme
+    - Aktif fanli sogutucu
+    - En az 64 GB kaliteli microSD veya USB SSD
+    - TensorRT engine build sirasinda gerekirse SSD uzerinde swap
+    - Kamera PoE ise ayri PoE switch veya injector
+
+Performans modu:
+
+    sudo nvpmodel -m 0
+    sudo jetson_clocks
+
+Headless mod:
+
+    sudo systemctl set-default multi-user.target
+
+Sicaklik, RAM ve GPU kullanimi:
+
+    sudo tegrastats
+
+
+7. ONNX VE TENSORRT ENGINE HAZIRLAMA
+-----------------------------------
+
+Tum TensorRT engine dosyalari hedef Jetson Nano uzerinde uretilmelidir.
+RTX 3060 PC'de egitim ve ONNX export yapilabilir; RTX 3060'da uretilen
+TensorRT engine Jetson Nano'ya tasinmamalidir.
+
+7.1 EDSR ONNX
+
+PC'de export ozellikleri:
+
+    Input name:      input
+    Input shape:     [1,1,128,160]
+    Output shape:    [1,1,512,640]
+    Precision:       FP32 ONNX
+    Opset:           13
+    Dynamic shape:   Hayir
+
+Jetson Nano'da engine:
+
+    /usr/src/tensorrt/bin/trtexec \
+      --onnx=edsr_4x_160x128.onnx \
+      --saveEngine=edsr_4x_160x128_fp16.engine \
+      --fp16 \
+      --workspace=512
+
+7.2 YOLO26n ONNX
+
+YOLO canli girisi EDSR ciktisiyla ayni olmalidir:
+
+    Input shape:     [1,3,512,640]
+    Batch:           1
+    Dynamic shape:   Hayir
+    Precision:       FP32 ONNX
+    Opset:           13
+    NMS/end-to-end:  Mumkunse ONNX disinda
+
+Ornek PC export:
+
+    yolo export \
+      model=yolo26n.pt \
+      format=onnx \
+      imgsz=512,640 \
+      opset=13 \
+      dynamic=False \
+      simplify=True
+
+Jetson Nano'da engine:
+
+    /usr/src/tensorrt/bin/trtexec \
+      --onnx=yolo26n_512x640.onnx \
+      --saveEngine=yolo26n_512x640_fp16.engine \
+      --fp16 \
+      --workspace=512
+
+YOLO26n yeni bir mimari, Jetson Nano ise TensorRT 8.x kullanan eski bir
+platformdur. ONNX parser destek sorunu cikarsa:
+
+    - opset 13 kullan,
+    - dynamic shape kullanma,
+    - end-to-end/NMS katmanlarini ONNX disina al,
+    - NMS'i C++ tarafinda uygula,
+    - ONNX graph'i simplify et,
+    - desteklenmeyen operatoru TensorRT plugin veya graph rewrite ile degistir.
+
+Engine olusturma sirasinda 4 GB RAM yetmezse SSD uzerinde gecici swap
+kullanilabilir. Runtime sirasinda swap kullanimi performansi dusurecegi icin
+uygulamanin aktif bellekte kalmasi gerekir.
+
+
+8. HIKVISION RTSP VE ETHERNET AYARLARI
+-------------------------------------
+
+Gigabit Ethernet bant genisligi bu sistemin ana darboğazi degildir. Ornegin:
+
+    2 Mbps video = 0.25 MB/s
+
+Bu, 1 Gbps Ethernet kapasitesinin cok kucuk bir bolumudur. Ana maliyetler:
+
+    - RTSP tamponlama
+    - video decode
+    - CPU/GPU kopyalari
+    - kameranin gereksiz buyutulmus stream gondermesi
+    - uzun GOP
+    - B-frame kullanimi
+    - ekranda goruntuleme ve renk haritasi
+
+Kamera modeli izin veriyorsa:
+
+    Termal stream:    Channel 202 alt akis veya gercek termal kanal
+    Cozunurluk:       Mumkunse dogrudan 160x120
+    Codec:            H.264
+    FPS:              15 veya 25
+    Bitrate:          512-1500 Kbps
+    Rate control:     CBR
+    B-frame:          Kapali
+    GOP/I-frame:      Yaklasik 1 saniye; FPS ile ayni
+    Ses:              Kapali
+    Smart codec:      Gecikme olusturuyorsa kapali
+
+Kamera 640x480 gibi dahili buyutulmus bir termal stream gonderiyorsa, bu
+goruntu NVDEC sonrasinda VIC/CUDA ile 160x120'ye indirilmelidir. Ancak bu
+islem "gercek radiometrik ham veri" anlamina gelmez; yalnizca canli video
+stream'inin yeniden boyutlandirilmis halidir. Kesin davranis kamera modeline
+ve Hikvision termal kanal ayarlarina baglidir.
+
+Dusuk gecikmeli GStreamer mantigi:
+
+    rtspsrc protocols=tcp latency=50 drop-on-latency=true
+        -> rtph264depay
+        -> h264parse
+        -> nvv4l2decoder
+        -> leaky queue (max 1 frame)
+        -> NVMM/CUDA preprocessing
+
+Kamera B-frame kullanmiyorsa nvv4l2decoder icin disable-dpb secenegi test
+edilebilir. B-frame varsa bu secenek goruntu bozulmasina neden olabilecegi
+icin kullanilmamalidir.
+
+TCP, kablolu mobese tipi kurulumda kararlilik icin uygundur. En dusuk
+gecikme istenirse UDP test edilebilir; paket kaybi durumunda kare bozulmasi
+veya atlama gorulebilir.
+
+
+9. MEVCUT PYTHON KODUNDA DUZELTILECEK NOKTALAR
+----------------------------------------------
+
+Mevcut hikvision_dual_camera_demo.py kodunda:
+
+    - cv2.VideoCapture + FFmpeg ile decode yapiliyor.
+    - read() her karede frame.copy() yapiyor.
+    - cvtColor ve resize CPU'da yapiliyor.
+    - NumPy FP32 dizi olusturuluyor.
+    - CPU -> GPU kopyasi yapiliyor.
+    - EDSR cikisi .cpu().numpy() ile tekrar CPU'ya indiriliyor.
+    - OpenCV ile goruntuleme ve renk haritasi uygulaniyor.
+
+Yeni YOLO pipeline'inda EDSR ciktisi kesinlikle CPU'ya indirilmeden YOLO'ya
+verilmelidir.
+
+cam_sdk/HCNetSDK.dll ve PlayCtrl.dll Windows DLL dosyalaridir. Jetson Nano
+Linux ARM64 uzerinde kullanilamaz. Jetson uygulamasi:
+
+    - dogrudan RTSP kullanmali veya
+    - Hikvision'in Linux ARM64 icin uygun SDK'si varsa onunla derlenmelidir.
+
+RTSP goruntusunu almak icin HCNetSDK login islemi zorunlu degildir; RTSP
+kimlik dogrulamasi yeterli olabilir.
+
+
+10. GUVENLIK
+------------
+
+Kamera parolasi kaynak kodda varsayilan deger olarak tutulmamalidir.
+Mevcut parola degistirilmeli ve yeni parola Git'e yazilmamalidir.
+
+Onerilen yontem:
+
+    export HIKVISION_IP="192.168.x.x"
+    export HIKVISION_USER="..."
+    export HIKVISION_PASSWORD="..."
+
+Uygulama bu degerleri environment veya sadece root tarafindan okunabilen bir
+config dosyasindan almalidir. RTSP URL'si ve parola loglara yazilmamalidir.
+
+
+11. DOGRULAMA VE BENCHMARK PLANI
+--------------------------------
+
+Her model ayri olculmelidir:
+
+    1. EDSR engine-only latency
+    2. YOLO engine-only latency
+    3. NVDEC + preprocessing latency
+    4. NMS latency
+    5. Uctan uca kamera -> tespit latency
+    6. Sicaklik ve throttle durumu
+    7. RAM kullanimi
+
+FPS hesabi:
+
+    FPS = 1000 / toplam_gecikme_ms
+
+Ornek:
+
+    EDSR             300 ms
+    YOLO              60 ms
+    Decode/preprocess 20 ms
+    NMS/output        10 ms
+    -----------------------
+    Toplam           390 ms
+    FPS = 1000/390 = 2.56 FPS
+
+Ilk 50-100 inference isinma olarak atilmali, ardindan en az 500 kare
+olculmelidir. Ortalama yaninda p50, p95 ve p99 latency raporlanmalidir.
+
+Kalite dogrulamasi:
+
+    - PyTorch FP32 EDSR ile TensorRT FP16 EDSR ciktisini karsilastir.
+    - PSNR ve SSIM farkini olc.
+    - YOLO mAP degerini FP32 ve FP16 icin karsilastir.
+    - Padding bulunan ust/alt bolgelerde yanlis tespit kontrolu yap.
+    - Kamera 160x120 canli verisindeki domain farkini ayrica test et.
+
+
+12. SON KARAR
+-------------
+
+Bu sistem icin dogru ve degistirilmeyecek sira:
+
+    Kamera 160x120
+        -> reflect padding 160x128
+        -> EDSR FP16 TensorRT 640x512
+        -> YOLO26n FP16 TensorRT 640x512
+        -> tespit
+
+Mevcut best_model.pth korunacaksa en hizli uygulama:
+
+    C++17 + GStreamer NVDEC + CUDA + TensorRT C++ API
+
+Beklenen Jetson Nano performansi:
+
+    2 - 4 FPS (tam optimize, mevcut EDSR ile)
+
+Daha yuksek FPS gerekiyorsa islem sirasi degistirilmeden:
+
+    EDSR 64x16 -> EDSR-Lite 32x8
+
+seklinde model kucultulmeli ve yeniden egitilmelidir. Bu durumda hedef:
+
+    5 - 10 FPS
+
+16x cascade Jetson Nano canli kullaniminda kapali tutulmalidir.
+
+
+13. BIRIM HATIRLATMASI
+----------------------
+
+    1 GMAC = 1 milyar MAC
+    1 MAC yaklasik 2 FLOP
+    1 GMAC yaklasik 2 GFLOP
+
+    1 GFLOP = 1 milyar floating-point islem
+    1 TFLOP = 1000 GFLOP
+    1 TFLOPS = saniyede 1000 GFLOP
+
+    1 TOPS = saniyede 1 trilyon operasyon
+    67 TOPS = saniyede teorik 67 trilyon operasyon
+
+Jetson Orin Nano Super'in 67 TOPS degeri sparse INT8 tepe degeridir ve
+Jetson Nano icin kullanilamaz. Jetson Nano, 128 CUDA cekirdekli Maxwell
+GPU'dur ve Tensor Core icermez.
+
+
+14. REFERANSLAR
+---------------
+
+NVIDIA Jetson Nano:
+https://developer.nvidia.com/embedded/jetson-nano
+
+Jetson L4T 32.7.6 hizlandirilmis GStreamer:
+https://docs.nvidia.com/jetson/archives/l4t-archived/l4t-3276/Tegra%20Linux%20Driver%20Package%20Development%20Guide/accelerated_gstreamer.html
+
+DeepStream 6.0.1 - Jetson Nano destegi:
+https://docs.nvidia.com/metropolis/deepstream/6.0.1/dev-guide/text/DS_Overview.html
+
+DeepStream performans ayarlari:
+https://docs.nvidia.com/metropolis/deepstream/6.0/dev-guide/text/DS_Performance.html
+
+Ultralytics YOLO26:
+https://docs.ultralytics.com/models/yolo26
+
+TensorRT engine uyumlulugu:
+https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-compatibility.html
+
+
+15.EDSR SADELESTIRME ANALIZI
+----------------------------------------------------
+15.1 EDSR sadeleştirme secenekleri
+
+Hesaplar 160x128 -> 640x512 EDSR giris/cikisi icindir.
+
+Mevcut model:
+
+    num_features = 64
+    num_residual_blocks = 16
+    Parametre = yaklasik 1.52 milyon
+    Hesap = 40.2 GMAC = 80.4 GFLOP/frame
+
+Alternatifler:
+
+    +----------------+-----------+-------------+------------------+-------------------+
+    | EDSR           | Parametre | EDSR GFLOP | EDSR+YOLO GFLOP | Tahmini C++ FPS   |
+    +----------------+-----------+-------------+------------------+-------------------+
+    | 64 feat, 16 RB | 1.52 M    | 80.4        | 84.7             | 2 - 4             |
+    | 48 feat, 12 RB | 687 K     | 38.5        | 42.8             | 3 - 6             |
+    | 32 feat,  8 RB | 232 K     | 14.2        | 18.5             | 6 - 12            |
+    | 24 feat,  8 RB | 131 K     |  8.0        | 12.3             | 8 - 16            |
+    | 16 feat,  4 RB |  40 K     |  2.8        |  7.1             | 10 - 20           |
+    +----------------+-----------+-------------+------------------+-------------------+
+
+FPS araliklari su kosullari varsayar:
+
+    - Jetson Nano 4 GB
+    - 10 W guc modu
+    - sudo jetson_clocks
+    - aktif sogutma
+    - batch 1
+    - FP16 TensorRT
+    - C++ TensorRT runtime
+    - NVDEC donanimsal video decode
+    - statik TensorRT engine boyutlari
+
+Gercek hizlanma sadece GFLOP oranina esit olmaz. RTSP, decode, preprocessing,
+YOLO, NMS, kernel baslatma ve bellek erisimi sabit maliyet olarak kalir.
+
+
+15.2 Onerilen dengeli student model
+
+Ilk sadeleştirme denemesi:
+
+    EDSR(
+        scale_factor=4,
+        num_channels=1,
+        num_features=32,
+        num_residual_blocks=8,
+    )
+
+Beklenen kazanim:
+
+    EDSR hesap yuku:       yaklasik 5.7 kat azalir
+    Parametre sayisi:      yaklasik 6.5 kat azalir
+    Toplam sistem yuku:    yaklasik 4.6 kat azalir
+    Tahmini C++ TRT hiz:   6 - 12 FPS
+
+32 kanal secimi TensorRT katman hizalamasi icin uygundur. 24x8 ve 16x4
+modellerinden daha yuksek kaliteyi koruma ihtimali vardir.
+
+10 FPS uzeri kesin bir hedef varsa 24 feature, 8 residual block modeli de
+egitilip 32x8 ile karsilastirilmalidir. 16x4 model daha hizli olabilir fakat
+super-resolution kalitesini ve downstream YOLO mAP degerini fazla dusurme
+riski yuksektir.
+
+
+15.3 Knowledge distillation ile kaliteyi koruma
+
+Kucuk model yalnizca HR hedefe karsi egitilmek yerine mevcut best_model.pth
+teacher olarak kullanilmalidir:
+
+    Teacher:
+        EDSR 64 feature, 16 residual block
+        best_model.pth yuklenir
+        eval moduna alinir
+        tum parametreleri dondurulur
+
+    Student:
+        EDSR 32 feature, 8 residual block
+        egitilecek yeni model
+
+Ornek egitim mantigi:
+
+    student_output = student(lr)
+
+    with torch.no_grad():
+        teacher_output = teacher(lr)
+
+    loss = (
+        thermal_sr_loss(student_output, hr)
+        + 0.20 * l1_loss(student_output, teacher_output)
+    )
+
+Buradaki 0.20 baslangic degeridir; validation sonuclarina gore ayarlanmalidir.
+Mevcut ThermalSRLoss icindeki piksel ve edge hedefleri korunabilir.
+
+Student ayni anda:
+
+    - gercek HR goruntuyu,
+    - teacher modelin rekonstruksiyon davranisini,
+    - termal kenar yapilarini
+
+ogrenir. Bu, sadece kucuk modeli sifirdan egitmeye gore kalite kaybini
+azaltabilir.
+
+
+15.4 Degerlendirme kriterleri
+
+Sadece PSNR sonucuna gore karar verilmemelidir. Her model icin:
+
+    - PSNR
+    - SSIM
+    - TensorRT FP16 engine latency
+    - uctan uca FPS
+    - GPU/RAM kullanimi
+    - YOLO mAP50
+    - YOLO mAP50-95
+    - kucuk hedef recall
+
+olculmelidir.
+
+Karsilastirma:
+
+    EDSR 64x16 FP32 -> YOLO mAP
+    EDSR 64x16 FP16 -> YOLO mAP
+    EDSR 32x8  FP16 -> YOLO mAP
+    EDSR 24x8  FP16 -> YOLO mAP
+
+Student model 0.3-0.5 dB civarinda PSNR kaybedip ayni veya kabul edilebilir
+YOLO mAP degerini koruyorsa, yuksek hesap tasarrufu nedeniyle daha iyi
+deployment modeli olabilir.
+
+
+15.5 PixelShuffle sadeleştirmesi
+
+Mevcut iki asamali upscale:
+
+    Conv -> PixelShuffle(2)
+    Conv -> PixelShuffle(2)
+
+Alternatif tek asamali upscale:
+
+    Conv -> PixelShuffle(4)
+
+Tek asamali PixelShuffle(4), ara 2x feature map ve bir upscale katmanini
+kaldirir. Tek basina toplam EDSR hesap yukunde yaklasik yuzde 7-8 azalma
+saglayabilir. Ana kazanim kanal ve residual block azaltmadan gelir; bu nedenle
+PixelShuffle degisikligi ikincil optimizasyondur.
+
+Bu degisiklik yeni bir mimari olusturdugu icin mevcut best_model.pth
+agirliklari dogrudan kullanilamaz ve model yeniden egitilmelidir.
+
+
+15.6 Pruning ve INT8 hakkinda
+
+Unstructured pruning ile agirliklari sifirlamak Jetson Nano'da otomatik
+TensorRT hizlanmasi saglamaz. Gercek hiz kazanimi icin kanal veya blok
+seviyesinde structured pruning gerekir.
+
+Kanal sayilari mumkunse 16, 24, 32, 48 veya 64 gibi TensorRT icin uygun
+katlarda tutulmalidir.
+
+EDSR icin ilk optimizasyon FP16 olmalidir. Jetson Nano Tensor Core
+icermedigi ve super-resolution piksel hassasiyetli oldugu icin INT8:
+
+    - FP16 kadar beklenen hiz kazancini vermeyebilir,
+    - PSNR/SSIM kaybina neden olabilir,
+    - YOLO tespit kalitesini bozabilir.
+
+INT8 ancak FP16 EDSR-Lite sonucu olculdukten sonra, temsili termal veriyle
+kalibrasyon yapilarak ayri bir deney olarak ele alinmalidir.
+
+
+15.7 Bu analizden cikan karar
+
+Birinci tercih:
+
+    YOLO26n TensorRT 8 engine olusuyorsa YOLO26n'yi koru.
+
+EDSR icin:
+
+    Mevcut teacher: 64 feature, 16 residual block
+    Ilk student:    32 feature, 8 residual block
+    Precision:      FP16
+    Runtime:        C++ TensorRT
+    Beklenen hiz:   6 - 12 FPS
+
+Ikinci deney:
+
+    Student:        24 feature, 8 residual block
+    Beklenen hiz:   8 - 16 FPS
+
+Nihai model PSNR/SSIM kadar YOLO mAP ve kucuk hedef recall sonucuna gore
+secilmelidir.

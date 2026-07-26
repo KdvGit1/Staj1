@@ -1,0 +1,598 @@
+BU-TIV TERMAL VİDEO TEST SİSTEMİ NOTLARI
+========================================
+
+1. İNDİRİLEN VERİLER
+--------------------
+
+Kaynak:
+https://csr.bu.edu/BU-TIV/BUTIV.html
+
+Proje içindeki konum:
+C:\Users\KDV\Desktop\Staj\ThermalDetection\
+thermal_live_detection\data\bu_tiv
+
+İndirilen dosyalar:
+
+- test_seq3.mp4
+- marathon_3_2d.xml
+- test_seq4.mp4
+- marathon_4_2d.xml
+
+Seq3:
+
+- 1275 video karesi
+- 1273 etiketli kare
+- people ve car sınıfları
+
+Seq4:
+
+- 1282 video karesi
+- 1281 etiketli kare
+- people, cyclist, motorcyclist ve car sınıfları
+
+Dosya boyutları, kaynak adresleri ve SHA-256 doğrulama değerleri:
+
+thermal_live_detection\data\bu_tiv\manifest.json
+
+BU-TIV atfı:
+
+Zheng Wu, Nathan Fuller, Diane Theriault, Margrit Betke,
+"A Thermal Infrared Video Benchmark for Visual Analysis", PBVS 2014.
+
+BU-TIV sayfasında açık bir standart lisans metni görünmemektedir. Veri
+yeniden dağıtılacak veya ticari amaçla kullanılacaksa veri sahibinden kullanım
+koşulları doğrulanmalıdır.
+
+
+2. SINIF EŞLEMESİ
+-----------------
+
+BU-TIV XML sınıfları mevcut YOLO modeline şu şekilde dönüştürülür:
+
+people        -> 0 person
+cyclist       -> 1 bike_motorcycle
+motorcyclist  -> 1 bike_motorcycle
+car           -> 2 car
+
+
+3. ÇÖZÜNÜRLÜK VE ETİKET KOORDİNATLARI
+--------------------------------------
+
+İndirilen MP4 dosyaları, BU-TIV tarafından yalnızca görüntüleme amacıyla
+paylaşılan 512x256 çözünürlüklü kopyalardır.
+
+XML etiket koordinatları ise asıl 1024x512 görüntü uzayındadır.
+
+Geliştirilen yazılım XML koordinatlarını otomatik olarak:
+
+1) video geometrisine,
+2) 160x120 düşük çözünürlüklü girişe,
+3) 640x480 EDSR çıktısına,
+4) 640x512 letterbox dedektör girdisine
+
+dönüştürür.
+
+Bu nedenle XML kutuları doğrudan kullanılabilir; elle yeniden ölçekleme
+yapılması gerekmez.
+
+
+4. HER KAREYE UYGULANAN İŞLEM
+-----------------------------
+
+BU-TIV video karesi
+    |
+    v
+Gaussian lens bulanıklığı
+    |
+    v
+INTER_AREA ile 160x120 çözünürlüğe düşürme
+    |
+    v
+EDSR x4 ile 640x480 büyütme
+    |
+    v
+Üst ve alta 16 piksel letterbox dolgusu
+    |
+    v
+640x512 YOLO26n girdisi
+    |
+    v
+person / bike_motorcycle / car tespiti
+    |
+    v
+YOLO tahminleri ile BU-TIV ground-truth kutularını gösterme
+
+Varsayılan lens bulanıklığı:
+
+Gaussian sigma = 0.0 (kapalı)
+
+Lens bulanıklığı 160x120 örneklemeden önce uygulanır. Bu işlem gerçek bir
+lensin ve düşük çözünürlüklü termal sensörün oluşturabileceği optik yumuşamayı
+yaklaşık olarak taklit eder.
+
+Sigma artırılırsa görüntü daha bulanık olur. Sıfır verilirse lens bulanıklığı
+kapatılır:
+
+--lens-blur-sigma 0
+
+
+5. EKRAN DÜZENİ
+---------------
+
+Sol üst panel:
+
+- Doğrudan BU-TIV source görüntüsü
+- Oranı koruyan 640x512 letterbox
+- YOLO26n tahmin kutuları
+- BU-TIV XML ground-truth kutuları
+- Kare ve sekans numarası
+
+Sağ üst panel:
+
+- 160x120 girdinin bicubic büyütmesi
+- YOLO26n tahminleri ve ground-truth kutuları
+
+Sol alt panel:
+
+- Aynı 160x120 girdinin EDSR x4 sonucu
+- YOLO26n tahminleri ve ground-truth kutuları
+
+Sağ alt panel:
+
+- EDSR uygulanmamış 160x120 düşük çözünürlüklü kare
+- piksellerin görülebilmesi için nearest-neighbor ile ekranda büyütülmüş hali
+- uygulanan lens sigma değeri
+
+Sağ alt paneldeki nearest-neighbor büyütme yalnızca ekranda görüntüleme içindir.
+Yeni ayrıntı üretmez, EDSR veya yumuşatma uygulamaz. Bu nedenle düşük
+çözünürlüklü girişin gerçek piksel yapısı korunur.
+
+Ground-truth renkleri:
+
+- person: yeşil
+- bike_motorcycle: mor
+- car: turuncu
+
+YOLO tahminleri Ultralytics tarafından daha kalın tahmin kutuları ve güven
+skorlarıyla çizilir.
+
+
+6. ÇALIŞTIRMA KOMUTLARI
+-----------------------
+
+Komutlar ThermalDetection proje kökünden, eğitim ve evaluation için kullanılan
+Python ortamı etkinleştirildikten sonra çalıştırılmalıdır.
+
+Seq3 ve Seq4 videolarını sırayla oynat:
+
+python -m thermal_live_detection.butiv_demo
+
+Yalnızca Seq3:
+
+python -m thermal_live_detection.butiv_demo --sequence 3
+
+Bisiklet ve motosiklet de içeren Seq4:
+
+python -m thermal_live_detection.butiv_demo --sequence 4
+
+Lens bulanıklığını değiştir:
+
+python -m thermal_live_detection.butiv_demo ^
+    --sequence 4 ^
+    --lens-blur-sigma 1.2
+
+PowerShell çok satırlı kullanım:
+
+python -m thermal_live_detection.butiv_demo `
+    --sequence 4 `
+    --lens-blur-sigma 1.2 `
+    --display-scale 0.8
+
+Pencere ekrana sığmıyorsa:
+
+--display-scale 0.7
+
+Ground-truth kutularını gizlemek için:
+
+--hide-ground-truth
+
+Belirli bir kareden başlatmak için:
+
+--start-frame 500
+
+İlk 100 kareyi işlemek için:
+
+--max-frames 100
+
+Videoları tekrar oynatmak için:
+
+--loop
+
+
+7. KLAVYE KONTROLLERİ
+---------------------
+
+P veya SPACE:
+    Duraklat veya devam ettir.
+
+Q veya ESC:
+    Oynatıcıdan çık.
+
+
+8. CUDA / GPU KULLANIMI
+-----------------------
+
+CUDA destekli PyTorch ve NVIDIA GPU varsa:
+
+python -m thermal_live_detection.butiv_demo `
+    --sequence 4 `
+    --device 0 `
+    --fp16
+
+--device 0:
+    Birinci CUDA GPU'yu kullanır.
+
+--fp16:
+    EDSR modelini desteklenen GPU'da yarım hassasiyetle çalıştırır ve
+    performansı artırabilir.
+
+Mevcut test ortamında PyTorch CPU-only olarak kurulu bulundu. İlk Seq4
+karesinde yaklaşık olarak:
+
+- EDSR: 4.5 saniye
+- YOLO: 2.7 saniye
+- toplam: yaklaşık 7 saniye
+
+görüldü. İlk kare model ısınması nedeniyle daha yavaş olabilir; ancak CPU ile
+30 FPS gerçek zamanlı çalışma beklenmemelidir.
+
+CPU ortamında yazılım kare kare doğru çalışır fakat ağır çekim hızında oynar.
+Gerçek zamana yaklaşmak için CUDA destekli PyTorch ve NVIDIA GPU gerekir.
+
+
+9. ÇIKTI VİDEOSU VE ÖNİZLEME KAYDI
+----------------------------------
+
+Yan yana görselleştirmeyi MP4 olarak kaydetmek için:
+
+python -m thermal_live_detection.butiv_demo `
+    --sequence 4 `
+    --output-video thermal_live_detection\outputs\seq4_comparison.mp4
+
+İlk işlenen karşılaştırma karesini PNG kaydetmek için:
+
+python -m thermal_live_detection.butiv_demo `
+    --sequence 4 `
+    --max-frames 1 `
+    --save-preview thermal_live_detection\outputs\seq4_preview.png
+
+Ekran açmadan işlemek için:
+
+--headless
+
+
+10. GELİŞTİRİLEN DOSYALAR
+-------------------------
+
+Ana BU-TIV oynatıcısı:
+
+thermal_live_detection\butiv_demo.py
+
+XML etiket okuyucu ve koordinat dönüştürücü:
+
+thermal_live_detection\butiv.py
+
+BU-TIV verileri:
+
+thermal_live_detection\data\bu_tiv
+
+Veri açıklaması:
+
+thermal_live_detection\data\bu_tiv\README.txt
+
+Dosya doğrulama ve kaynak manifesti:
+
+thermal_live_detection\data\bu_tiv\manifest.json
+
+Seq3 test önizlemesi:
+
+thermal_live_detection\data\bu_tiv\seq3_preview.png
+
+Seq4 test önizlemesi:
+
+thermal_live_detection\data\bu_tiv\seq4_preview.png
+
+
+11. DOĞRULAMA SONUÇLARI
+-----------------------
+
+- Seq3 MP4 başarıyla açıldı.
+- Seq3 XML dosyasındaki 1273 etiketli kare başarıyla okundu.
+- Seq4 MP4 başarıyla açıldı.
+- Seq4 XML dosyasındaki 1281 etiketli kare başarıyla okundu.
+- Sınıf eşlemeleri doğrulandı.
+- XML koordinatlarının 640x512 dedektör girdisine dönüşümü doğrulandı.
+- Gaussian lens bulanıklığı doğrulandı.
+- 160x120 düşük çözünürlüklü giriş üretildi.
+- EDSR modeli 640x480 çıktı üretti.
+- Letterbox işlemi 640x512 çıktı üretti.
+- YOLO modeli üç sınıfla çalıştı.
+- Seq3 ve Seq4 için yan yana önizleme görüntüleri üretildi.
+- Projedeki toplam 12 otomatik test başarıyla geçti.
+
+
+12. TEST SONUÇLARINI YORUMLARKEN
+--------------------------------
+
+BU-TIV MP4 dosyaları asıl 16-bit NUC görüntülerin yarı çözünürlüklü görüntüleme
+kopyalarıdır. Daha sonra tekrar 160x120'ye düşürüldükleri için oldukça zor bir
+test oluştururlar.
+
+Bu test şu sorular için yararlıdır:
+
+- Model çok küçük ve kalabalık kişileri görebiliyor mu?
+- Lens bulanıklığı performansı ne kadar etkiliyor?
+- EDSR küçük nesnelerde fayda sağlıyor mu?
+- Bisiklet/motosiklet sınıfı Seq4 üzerinde çalışıyor mu?
+- Sıcak araç ve arka plan bölgeleri yanlış person tespitine yol açıyor mu?
+- Ground-truth ile tahmin kutuları ne kadar örtüşüyor?
+
+Görsel inceleme tek başına sayısal evaluation değildir. Gerçek precision,
+recall ve mAP hesaplamak için XML kutularının değerlendirme formatına
+dönüştürülmesi ve tüm etiketli karelerin sırayla işlenmesi gerekir.
+
+Canlı oynatıcı yerel videolarda kare atlamaz; VideoCapture üzerinden kareleri
+sırayla işler. İşlem süresi video FPS değerinden uzunsa oynatma otomatik olarak
+yavaşlar, fakat etiket-kare eşleşmesi korunur.
+
+========================================
+NOT DOSYASI SONU
+========================================
+
+
+13. 24 TEMMUZ 2026 DÜZELTME NOTU
+---------------------------------
+
+İlk oynatıcıda BU-TIV'in 512x256 boyutundaki 2:1 görüntüsü doğrudan 160x120
+boyutuna çevriliyordu. Bu işlem kişileri ve araçları dikey yönde esnetiyordu.
+Ayrıca varsayılan Gaussian sigma=1.2 bulanıklığı, zaten yarı çözünürlüklü ve
+sıkıştırılmış MP4 üzerindeki küçük nesne bilgisini ciddi biçimde azaltıyordu.
+
+13 farklı Seq4 karesinde yapılan tanısal karşılaştırma:
+
+Yöntem                         TP@IoU0.5   Tahmin   Yaklaşık precision
+---------------------------------------------------------------------
+Doğrudan source                    104       150        %69.3
+Bicubic, blursuz                     6        35        %17.1
+EDSR, blursuz                        4        14        %28.6
+Bicubic + sigma 1.2 blur             1        48         %2.1
+EDSR + sigma 1.2 blur                0        25         %0.0
+
+Bu sonuç XML koordinatlarının ve video-kare senkronunun doğru olduğunu; ağır
+başarısızlığın esas olarak ön işleme ve görüntü dağılımı uyumsuzluğundan
+kaynaklandığını gösterdi.
+
+Uygulanan düzeltmeler:
+
+- Lens bulanıklığının varsayılan değeri 1.2 yerine 0.0 yapıldı.
+- Blur yalnızca --lens-blur-sigma ile kontrollü deney olarak açılabilir.
+- 512x256 görüntü artık 160x120'ye esnetilmiyor.
+- Oran korunarak 160x80 içerik üretiliyor.
+- 160x80 içerik, 160x120 tuvale üst-alt 20 piksel dolgu ile ortalanıyor.
+- Source, bicubic ve EDSR görüntüleri aynı geometrik uzayda tutuluyor.
+- Her üç YOLO sonucu aynı kare üzerinde toplu olarak hesaplanıyor.
+- Source, bicubic, EDSR ve native görüntü 2x2 düzende birlikte gösteriliyor.
+- Ground-truth kutuları üç tahmin panelinde de doğru koordinatla çiziliyor.
+- Varsayılan pencere ölçeği 0.75 olarak ayarlandı.
+- Yeni oran-koruma testi eklendi.
+- Projedeki toplam otomatik test sayısı 13'e çıktı ve tamamı geçti.
+
+Yeni ekran düzeni:
+
+sol üst   = source + YOLO + ground truth
+sağ üst   = 160x120 bicubic + YOLO + ground truth
+sol alt   = 160x120 EDSR x4 + YOLO + ground truth
+sağ alt   = gerçek 160x120 native giriş
+
+Yeni doğrulama önizlemesi:
+
+thermal_live_detection\data\bu_tiv\seq4_comparison_fixed.png
+
+
+14. UNUTULMAMASI GEREKEN SONRAKİ AŞAMA: EDSR İLE FINE-TUNE
+----------------------------------------------------------
+
+TODO / SONRAKİ GELİŞTİRME:
+
+Mevcut YOLO modeli gerçek/orijinal 640x512 termal görüntüler üzerinde
+eğitilmiştir. EDSR çıktıları farklı kenar, kontrast, gürültü ve doku dağılımı
+oluşturduğu için detector bu görüntüleri eğitim sırasında görmemiştir.
+
+Canlı sistemde EDSR çıktısı detector girdisi olarak kullanılacaksa:
+
+1) Eski eğitim görüntüleri, gerçek canlı prosedürle düşük çözünürlüğe
+   dönüştürülmelidir.
+2) En-boy oranı korunmalıdır.
+3) Aynı 160x120 girdiler EDSR x4 modelinden geçirilmelidir.
+4) Mevcut etiketler yeni letterbox koordinatlarına dönüştürülmelidir.
+5) Orijinal termal görüntüler tamamen kaldırılmadan, EDSR türevleriyle
+   karıştırılmış bir eğitim seti hazırlanmalıdır.
+6) Mevcut en iyi YOLO ağırlığı bu karışık veri üzerinde düşük öğrenme oranıyla
+   fine-tune edilmelidir.
+7) Source, bicubic ve EDSR yolları aynı kilitli test setinde ayrı ayrı
+   evaluation edilmelidir.
+8) Özellikle bike_motorcycle recall, küçük person recall, yanlış pozitif/saat
+   ve FPS karşılaştırılmalıdır.
+
+Bu fine-tune işlemi şu an uygulanmadı ve bilerek sonraki aşamaya bırakıldı.
+EDSR'nin detector girdisi olarak kalıcı kullanımı hakkında karar verilmeden
+önce mutlaka bu deney yapılmalıdır.
+
+========================================
+GÜNCEL NOT DOSYASI SONU
+========================================
+
+
+15. RASTGELE N KARELİ DÖRT-PANEL RAPORU
+---------------------------------------
+
+Yeni komut:
+
+python -m thermal_live_detection.butiv_random_report
+
+Varsayılan ayarlar:
+
+- n = 200 rastgele etiketli kare
+- seed = 42
+- Seq3 ve Seq4 birlikte
+- confidence = 0.25
+- NMS IoU = 0.70
+- GT eşleştirme IoU = 0.50
+- lens blur sigma = 0.0
+- geleneksel NMS
+- JPEG kalite = 92
+
+Örnek sayısını değiştirme:
+
+python -m thermal_live_detection.butiv_random_report -n 50
+
+Farklı ve tekrar üretilebilir rastgele seçim:
+
+python -m thermal_live_detection.butiv_random_report `
+    -n 200 `
+    --seed 123
+
+Yalnızca Seq4:
+
+python -m thermal_live_detection.butiv_random_report `
+    -n 100 `
+    --sequence 4
+
+Her seçilen kare için tek JPEG içinde dört panel kaydedilir:
+
+sol üst   = source + YOLO + GT
+sağ üst   = bicubic + YOLO + GT
+sol alt   = EDSR + YOLO + GT
+sağ alt   = native 160x120
+
+Çıktı klasörü:
+
+thermal_live_detection\results\butiv_random_n<N>_seed<SEED>_<UTC>\
+
+Üretilen dosyalar:
+
+frames\
+    Rastgele seçilen N adet dört-panelli JPEG.
+
+selected_frames.csv
+    Seçilen sequence ve frame numaraları. Aynı seed ile seçim tekrar
+    üretilebilir.
+
+per_frame_metrics.csv
+    Her kare ve her pipeline için TP, FP, FN, prediction, ground-truth,
+    precision, recall, F1, confidence, eşleşen IoU ve süreler.
+
+summary.csv
+    Source, bicubic ve EDSR için genel ve sınıf bazlı toplu sonuçlar.
+
+summary.json
+    Yapılandırma, EDSR checkpoint bilgisi, özet metrikler ve süreler.
+
+REPORT.txt
+    İnsan tarafından okunabilir Türkçe sonuç raporu.
+
+graphs\pipeline_overall_metrics.png
+    Source, bicubic ve EDSR precision-recall-F1 karşılaştırması.
+
+graphs\class_recall.png
+    Person, bike_motorcycle ve car sınıf bazlı recall karşılaştırması.
+
+graphs\tp_fp_fn.png
+    Pipeline bazlı TP, FP ve FN kutu sayıları.
+
+graphs\runtime_ms.png
+    Ortalama EDSR, üç-pipeline YOLO batch/kare ve toplam model süreleri.
+
+Metrik eşleştirmesi:
+
+- Tahmin ve GT sınıfı aynı olmalıdır.
+- Tahmin ve GT IoU değeri varsayılan olarak en az 0.50 olmalıdır.
+- Her GT kutusu en fazla bir tahminle eşleştirilir.
+- Eşleşen tahmin TP, eşleşmeyen tahmin FP, eşleşmeyen GT FN sayılır.
+
+Bu rastgele rapor tam BU-TIV benchmark sonucu değildir. Seçilen kareler
+üzerinde source/bicubic/EDSR etkisini hızlı ve tekrar üretilebilir biçimde
+karşılaştırmak için kullanılır.
+
+========================================
+RASTGELE RAPOR NOTU SONU
+========================================
+
+
+16. GERÇEK 200 KARELİ ÇALIŞTIRMA SONUCU
+----------------------------------------
+
+Çalıştırma:
+
+python -m thermal_live_detection.butiv_random_report `
+    -n 200 `
+    --seed 42 `
+    --sequence all
+
+Sonuç klasörü:
+
+thermal_live_detection\results\butiv_random_n200_seed42_20260724
+
+Örnek dağılımı:
+
+- Seq3: 108 rastgele kare
+- Seq4: 92 rastgele kare
+- Toplam: 200 kare
+- Dört-panel JPEG: 200 dosya
+- Pipeline metrik satırı: 600
+- Grafik: 4 PNG
+- Hata günlüğü: boş
+
+Genel sonuçlar:
+
+pipeline        TP      FP      FN     precision    recall      F1
+-----------------------------------------------------------------
+source        1818     932    9935      0.6611     0.1547    0.2507
+bicubic        209     591   11544      0.2612     0.0178    0.0333
+edsr           175     228   11578      0.4342     0.0149    0.0288
+
+Sınıf bazlı önemli sonuçlar:
+
+source person:
+    TP=1814, FP=780, FN=9745, precision=0.6993, recall=0.1569
+
+source bike_motorcycle:
+    TP=4, FP=141, FN=50, precision=0.0276, recall=0.0741
+
+source car:
+    TP=0, FP=11, FN=140, recall=0.0000
+
+bicubic person:
+    TP=209, FP=587, FN=11350, precision=0.2626, recall=0.0181
+
+EDSR person:
+    TP=174, FP=222, FN=11385, precision=0.4394, recall=0.0151
+
+EDSR car:
+    TP=1, FP=5, FN=139, precision=0.1667, recall=0.0071
+
+Ortalama süreler:
+
+- EDSR: 514.62 ms / kare
+- Üç-pipeline YOLO batch: 232.78 ms / kare
+- Toplam model süresi: 747.40 ms / kare
+
+Bu 200 karelik sonuç, source görüntünün mevcut detector için bicubic ve
+EDSR'den açık biçimde daha uygun olduğunu doğruladı. EDSR'nin precision değeri
+bicubic'ten yüksek olsa da recall çok düşüktür. Bu nedenle mevcut EDSR çıktısı
+detector girdisi olarak kullanılmadan önce 14. bölümdeki EDSR fine-tune
+çalışması yapılmalıdır.
+
+========================================
+200 KARELİ RAPOR NOTU SONU
+========================================

@@ -19,6 +19,7 @@ venv/
 .dvc-system/
 .dvc-global/
 .dvc-site/
+.dvc-auth/
 
 # Common suffix for any future DVC-managed dataset directory
 *.dvcdata/

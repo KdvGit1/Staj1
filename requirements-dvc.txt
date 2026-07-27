@@ -1,1 +1,5 @@
 dvc[gdrive]==3.67.1
+pydrive2==1.21.3
+pyOpenSSL==24.2.1
+cryptography==43.0.3
+asyncssh==2.20.0

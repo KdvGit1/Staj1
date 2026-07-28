@@ -1,0 +1,5 @@
+outs:
+- md5: cf3cca69f04cf639bafdeb2644bd0843
+  size: 5544453
+  hash: md5
+  path: yolo26n.pt

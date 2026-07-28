@@ -179,6 +179,13 @@ ThermalDlss/
 
 - `ThermalUpscale.pdf`: SISR ve optik rehberli SR için kavramsal el kitabı.
 - `loss ve model mimari ve PNSR,SSIM.md`: EDSR, loss ve metrik tasarım notları.
+- `PSEUDO_HR_EDSR_ARASTIRMA_VE_DENEY_PLANI.md`: Projedeki mevcut model ve
+  dataset üzerinden 16 görüntülü `4×4` pseudo-HR üretimi, native
+  `640×512 → 2560×2048` fine-tuning deneyleri ve literatür planı.
+- `mosaic_system/`: Planın database'i kopyalamadan uygulanan deterministik
+  RAM/rolling-cache veri hattı, mixed-replay fine-tuning, aynı-seed evaluation
+  ve Optuna hiperparametre optimizasyon sistemi. RTX 3060 komutları:
+  [`mosaic_system/OPTUNA_KULLANIM_REHBERI.md`](mosaic_system/OPTUNA_KULLANIM_REHBERI.md).
 - `cupy_conversion_diff.txt`: CPU ve CuPy veri işleme yollarının geçmiş karşılaştırması.
 - `hikvision_sdk_analysis_report.txt`: Kamera SDK araştırma notu.
 - `yolo gan 16x.txt`: GAN + YOLO için gelecek faz önerisi.

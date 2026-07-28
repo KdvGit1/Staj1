@@ -1,0 +1,6 @@
+outs:
+- md5: ecf0dd92718f5b434f2c83b2bf0310b2.dir
+  size: 58687488
+  nfiles: 12
+  hash: md5
+  path: testFoto

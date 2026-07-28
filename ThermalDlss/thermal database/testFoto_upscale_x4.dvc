@@ -1,0 +1,6 @@
+outs:
+- md5: 6aa99601c239e4e8cadfd89c3e4167e5.dir
+  size: 19836913
+  nfiles: 6
+  hash: md5
+  path: testFoto_upscale_x4

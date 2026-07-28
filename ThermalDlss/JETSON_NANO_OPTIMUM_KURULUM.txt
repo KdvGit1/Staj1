@@ -11,7 +11,7 @@ her islenen karede calisacaktir.
 
 Kesin islem sirasi:
 
-    Hikvision termal kamera
+    Hikvision termal kamera (renkli/pseudo-color kare)
               |
               v
     Ethernet / RTSP / H.264
@@ -20,7 +20,10 @@ Kesin islem sirasi:
     Donanimsal video decode (NVDEC)
               |
               v
-    Kamera goruntusu: 160x120
+    BGR/RGB -> grayscale donusumu
+              |
+              v
+    Grayscale kamera goruntusu: 160x120
               |
               v
     Dikey reflect padding: 160x120 -> 160x128
@@ -36,6 +39,23 @@ Kesin islem sirasi:
               |
               v
     NMS, tespitler, alarm ve goruntuleme
+
+Orijinal termal fotograflar grayscale degildir. Egitim verisi hazirlanirken
+once renkli/pseudo-color 640x512 goruntu grayscale'e cevrilir. EDSR'nin hem
+LR girdisi hem HR hedefi bu grayscale goruntuden uretilir:
+
+    Orijinal renkli/pseudo-color HR 640x512
+        -> grayscale HR 640x512
+        -> bicubic downscale
+        -> grayscale LR 160x128
+
+Canli tarafta da ayni semantik sira korunur:
+
+    Decode edilmis BGR/RGB kamera karesi
+        -> grayscale
+        -> gerekiyorsa resize 160x120
+        -> reflect padding 160x128
+        -> EDSR x4
 
 Veri seti ve kamera boyutlari birbirinden farklidir:
 
@@ -207,7 +227,8 @@ Tek proses, uc is parcacigi onerilir:
 
     Thread 2 - GPU Inference
         - En son 160x120 kareyi alir.
-        - CUDA/VIC ile grayscale donusumu yapar.
+        - Renkli/pseudo-color kareyi CUDA ile grayscale'e cevirir.
+        - Gerekiyorsa grayscale kareyi 160x120 boyutuna getirir.
         - Reflect padding ile 160x128 yapar.
         - EDSR FP16 TensorRT calistirir.
         - EDSR ciktisini GPU'da YOLO tensorune cevirir.
@@ -229,8 +250,8 @@ gecikmesinin zamanla birikmesini engellemektir.
 
 Tum GPU buffer'lari uygulama baslarken bir kez ayrilmalidir:
 
-    decoded NV12/RGBA buffer
-    gray 160x120 buffer
+    decoded NV12/RGBA/BGR renkli buffer
+    grayscale 160x120 buffer
     padded EDSR input [1,1,128,160] FP16
     EDSR output [1,1,512,640] FP16
     YOLO input [1,3,512,640] FP16
@@ -378,11 +399,12 @@ Kamera modeli izin veriyorsa:
     Ses:              Kapali
     Smart codec:      Gecikme olusturuyorsa kapali
 
-Kamera 640x480 gibi dahili buyutulmus bir termal stream gonderiyorsa, bu
-goruntu NVDEC sonrasinda VIC/CUDA ile 160x120'ye indirilmelidir. Ancak bu
-islem "gercek radiometrik ham veri" anlamina gelmez; yalnizca canli video
-stream'inin yeniden boyutlandirilmis halidir. Kesin davranis kamera modeline
-ve Hikvision termal kanal ayarlarina baglidir.
+Kamera 640x480 gibi dahili buyutulmus renkli/pseudo-color bir termal stream
+gonderiyorsa, goruntu NVDEC sonrasinda once grayscale'e cevrilmeli, ardindan
+VIC/CUDA ile 160x120'ye indirilmelidir. Ancak bu islem "gercek radiometrik ham
+veri" anlamina gelmez; yalnizca canli video stream'inin grayscale ve yeniden
+boyutlandirilmis halidir. Kesin davranis kamera modeline ve Hikvision termal
+kanal ayarlarina baglidir.
 
 Dusuk gecikmeli GStreamer mantigi:
 
@@ -488,7 +510,9 @@ Kalite dogrulamasi:
 
 Bu sistem icin dogru ve degistirilmeyecek sira:
 
-    Kamera 160x120
+    Renkli/pseudo-color kamera karesi
+        -> grayscale
+        -> resize 160x120
         -> reflect padding 160x128
         -> EDSR FP16 TensorRT 640x512
         -> YOLO26n FP16 TensorRT 640x512
@@ -750,3 +774,49 @@ Ikinci deney:
 
 Nihai model PSNR/SSIM kadar YOLO mAP ve kucuk hedef recall sonucuna gore
 secilmelidir.
+
+
+16. GRAYSCALE DONUSUMUNUN KESIN YERI
+------------------------------------
+
+Orijinal fotograflar ve kameradan decode edilen kareler renkli/pseudo-color
+oldugu icin grayscale donusumu upscale isleminden ONCE yapilacaktir.
+
+Egitim veri hazirlama sirasi:
+
+    1. Renkli/pseudo-color orijinal HR fotografi ac.
+    2. HR fotografi grayscale L moduna cevir.
+    3. Grayscale 640x512 goruntuyu HR hedef olarak kullan/kaydet.
+    4. Ayni grayscale HR goruntuyu bicubic ile 160x128'e indir.
+    5. Grayscale 160x128 LR -> grayscale 640x512 HR ciftiyle EDSR egit.
+
+Canli inference sirasi:
+
+    1. Hikvision RTSP karesini donanimsal olarak decode et.
+    2. Decode edilmis renkli BGR/RGB/pseudo-color kareyi grayscale'e cevir.
+    3. Grayscale goruntuyu gerekiyorsa 160x120'ye indir.
+    4. Uste ve alta 4'er piksel reflect padding ekleyerek 160x128 yap.
+    5. Grayscale tensoru [1,1,128,160] FP16 olarak EDSR'ye ver.
+    6. EDSR'den grayscale [1,1,512,640] FP16 cikti al.
+    7. YOLO 3 kanal bekliyorsa EDSR grayscale cikisini GPU'da uc kanala
+       kopyala; CPU'ya indirme.
+    8. [1,3,512,640] FP16 tensoru YOLO26n TensorRT engine'e ver.
+
+Grayscale donusumunun egitim ve canli tarafta ayni olmasi onemlidir.
+OpenCV BGR2GRAY icin tipik donusum:
+
+    Gray = 0.114 * B + 0.587 * G + 0.299 * R
+
+Pillow RGB -> L donusumu da ayni temel agirliklari kullanir:
+
+    L = 0.299 * R + 0.587 * G + 0.114 * B
+
+C++/CUDA uygulamasinda kanal sirasi karistirilmamalidir:
+
+    OpenCV/GStreamer BGR ise: 0.114B + 0.587G + 0.299R
+    RGB ise:                  0.299R + 0.587G + 0.114B
+
+NV12'in Y duzlemini dogrudan grayscale olarak kullanmak daha hizli olabilir;
+ancak renk matrisi ve limited/full range davranisi egitimdeki Pillow/OpenCV
+donusumunden farkli olabilir. Once ayni karelerde piksel farki olculmeli,
+esdegerlik dogrulanmadan Y duzlemi dogrudan kullanilmamalidir.

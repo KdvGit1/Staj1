@@ -9,7 +9,7 @@ Hikvision bi-spectrum kameralarından canlı termal akış (Channel 201/202) ala
 
 Klavye Kontrolleri:
 - [v] : Tek Görünüm (EDSR Only - Yüksek FPS) / Multi-Panel Karşılaştırma Modu
-- [s] : O anki Raw 160x120, Bicubic 4x, EDSR 4x ve EDSR 16x karelerini kaydeder
+- [s] : Ekranda görünen açıklamalı görünümü tek bir canvas PNG olarak kaydeder
 - [c] : Renk haritasını değiştirir (Grayscale ➔ JET ➔ INFERNO ➔ HOT)
 - [t] : CMD ekranında detaylı ağ ve telemetri raporunu yazdırır
 - [1] : Canlı 16x Cascade modunu açar / kapatır
@@ -297,7 +297,7 @@ def run_live_thermal_sr(
 
     print("KONTROLLER:")
     print("  - [v] tuşu : Tek Görünüm (Sadece EDSR - Yüksek FPS) / Multi-Panel arasında geçiş yapar.")
-    print("  - [s] tuşu : O anki raw 160x120, bicubic 4x ve EDSR 4x/16x çıktılarını kaydeder.")
+    print("  - [s] tuşu : Ekranda görünen açıklamalı görünümü tek bir canvas PNG olarak kaydeder.")
     print("  - [c] tuşu : Renk haritasını değiştirir (Grayscale ➔ JET ➔ INFERNO ➔ HOT).")
     print("  - [t] tuşu : CMD ekranına güncel ağ ve telemetri raporunu yazdırır.")
     print("  - [1] tuşu : 16x Cascade modunu açar / kapatır.")
@@ -358,10 +358,9 @@ def run_live_thermal_sr(
         fps = 0.85 * fps + 0.15 * (1.0 / max(elapsed_t, 0.001))
 
         if single_view:
-            display_frame = edsr_4x_vis.copy()
+            live_canvas = edsr_4x_vis.copy()
             info_text = f"REALTIME EDSR 4X ({native_w*4}x{native_h*4}) | FPS: {fps:.1f} | Latency: {latency_ms:.1f}ms | {device.type.upper()}"
-            cv2.putText(display_frame, info_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.imshow("Hikvision Thermal Live Super-Resolution", display_frame)
+            cv2.putText(live_canvas, info_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         else:
             raw_vis = apply_thermal_colormap(cv2.resize(raw_160x120, (native_w * 4, native_h * 4), interpolation=cv2.INTER_NEAREST), active_cmap)
@@ -402,7 +401,10 @@ def run_live_thermal_sr(
                 cv2.putText(combined_canvas, p["title"], (x_offset + 10, header_h + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
                 cv2.putText(combined_canvas, p["sub"], (x_offset + 10, header_h + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
-            cv2.imshow("Hikvision Thermal Live Super-Resolution", combined_canvas)
+            live_canvas = combined_canvas
+
+        # Hem ekrana hem snapshot'a aynı render edilmiş canvas gönderilir.
+        cv2.imshow("Hikvision Thermal Live Super-Resolution", live_canvas)
 
         key = cv2.waitKey(1) & 0xFF
 
@@ -436,24 +438,17 @@ def run_live_thermal_sr(
         elif key == ord('s'):
             snapshot_counter += 1
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_fn = os.path.join(
+                output_dir,
+                f"thermal_live_canvas_{timestamp}_{snapshot_counter}.png",
+            )
 
-            raw_fn = os.path.join(output_dir, f"thermal_raw160x120_{timestamp}_{snapshot_counter}.png")
-            bic_fn = os.path.join(output_dir, f"thermal_bicubic4x_{timestamp}_{snapshot_counter}.png")
-            edsr_fn = os.path.join(output_dir, f"thermal_edsr4x_{timestamp}_{snapshot_counter}.png")
-
-            cv2.imwrite(raw_fn, raw_160x120)
-            cv2.imwrite(bic_fn, bicubic_4x_np)
-            cv2.imwrite(edsr_fn, pred_4x_np)
-
-            print(f"\n📸 Live Snapshots Kaydedildi (# {snapshot_counter}):")
-            print(f"   -> Raw Sensor (160x120) : {raw_fn}")
-            print(f"   -> Bicubic (640x480)    : {bic_fn}")
-            print(f"   -> EDSR SR (640x480)     : {edsr_fn}")
-
-            if enable_16x and pred_16x_np is not None:
-                edsr16x_fn = os.path.join(output_dir, f"thermal_edsr16x_{timestamp}_{snapshot_counter}.png")
-                cv2.imwrite(edsr16x_fn, pred_16x_np)
-                print(f"   -> EDSR 16x (2560x1920)  : {edsr16x_fn}")
+            if cv2.imwrite(snapshot_fn, live_canvas):
+                canvas_h, canvas_w = live_canvas.shape[:2]
+                print(f"\n📸 Açıklamalı canlı görünüm tek canvas olarak kaydedildi (# {snapshot_counter}):")
+                print(f"   -> {snapshot_fn} ({canvas_w}x{canvas_h})")
+            else:
+                print(f"\n❌ Snapshot kaydedilemedi: {snapshot_fn}")
 
     stream.stop()
     cv2.destroyAllWindows()
